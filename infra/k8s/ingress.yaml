@@ -1,0 +1,65 @@
+# GKE managed Ingress — provisions a Google Cloud HTTP(S) Load Balancer.
+# A static IP is reserved separately (see comment) so DNS doesn't move
+# every time the Ingress is recreated.
+#
+# Path routing:
+#   /v1/ingest, /health  →  ingest-api:8000
+#   /auth/*, /projects/* →  auth-service:8001
+#   everything else      →  dashboard:80
+#
+# This is intentionally simple — auth-service paths are not prefixed with
+# /api/auth, the dashboard's BFF already proxies internally. The browser
+# never talks to auth-service directly in production; the ingress rule
+# is here for tools/CLI/curl.
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: opentelm-ingress
+  namespace: opentelm
+  annotations:
+    kubernetes.io/ingress.class: "gce"
+    # Reserve with: gcloud compute addresses create opentelm-ingress-ip --global
+    # then: kubernetes.io/ingress.global-static-ip-name: opentelm-ingress-ip
+    # kubernetes.io/ingress.global-static-ip-name: "opentelm-ingress-ip"
+
+    # Force HTTPS once a managed cert is attached (see networking.gke.io
+    # ManagedCertificate resource — out of scope here)
+    # networking.gke.io/managed-certificates: "opentelm-cert"
+spec:
+  defaultBackend:
+    service:
+      name: dashboard
+      port:
+        number: 80
+  rules:
+    - http:
+        paths:
+          - path: /v1/ingest
+            pathType: Prefix
+            backend:
+              service:
+                name: ingest-api
+                port:
+                  number: 8000
+          - path: /auth
+            pathType: Prefix
+            backend:
+              service:
+                name: auth-service
+                port:
+                  number: 8001
+          - path: /projects
+            pathType: Prefix
+            backend:
+              service:
+                name: auth-service
+                port:
+                  number: 8001
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: dashboard
+                port:
+                  number: 80

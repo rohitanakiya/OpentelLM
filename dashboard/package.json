@@ -1,0 +1,33 @@
+{
+  "name": "opentelm-dashboard",
+  "version": "0.4.0",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently -n \"next,ws\" -c \"cyan,magenta\" \"next dev -p 3000\" \"node ws-server.mjs\"",
+    "build": "next build",
+    "start": "concurrently -n \"next,ws\" -c \"cyan,magenta\" \"next start -p 3000\" \"node ws-server.mjs\"",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@clickhouse/client": "1.0.2",
+    "ioredis": "5.4.1",
+    "jose": "5.4.0",
+    "lucide-react": "0.378.0",
+    "next": "14.2.3",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "recharts": "2.12.7",
+    "ws": "8.17.0"
+  },
+  "devDependencies": {
+    "@types/node": "20.12.12",
+    "@types/react": "18.3.2",
+    "@types/react-dom": "18.3.0",
+    "@types/ws": "8.5.10",
+    "autoprefixer": "10.4.19",
+    "concurrently": "8.2.2",
+    "postcss": "8.4.38",
+    "tailwindcss": "3.4.3",
+    "typescript": "5.4.5"
+  }
+}

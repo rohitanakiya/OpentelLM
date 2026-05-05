@@ -1,0 +1,136 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Only one deploy in flight at a time. Queue further runs.
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write   # required to mint OIDC token for GCP WIF
+
+env:
+  GCP_REGION: asia-south1
+  GKE_CLUSTER: opentelm-prod
+  ARTIFACT_REGISTRY: asia-south1-docker.pkg.dev
+  REPO: opentelm
+  K8S_NAMESPACE: opentelm
+
+jobs:
+  # Wait for CI to pass on this commit. We require the workflow run on
+  # the same SHA to have succeeded — no merging to main while red.
+  wait-for-ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Wait for ci.yml
+        uses: lewagon/wait-on-check-action@v1.3.4
+        with:
+          ref: ${{ github.sha }}
+          check-name: 'test-python'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 15
+          allowed-conclusions: success
+
+  build-and-push:
+    needs: wait-for-ci
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.sha.outputs.short }}
+    strategy:
+      # Each service builds in parallel; one failure aborts the matrix.
+      matrix:
+        service:
+          - { name: ingest-api,        path: ingest-api }
+          - { name: auth-service,      path: auth-service }
+          - { name: stream-processor,  path: stream-processor }
+          - { name: anomaly-consumer,  path: anomaly-consumer }
+          - { name: dashboard,         path: dashboard }
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: sha
+        run: echo "short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker $ARTIFACT_REGISTRY --quiet
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push ${{ matrix.service.name }}
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.service.path }}
+          push: true
+          tags: |
+            ${{ env.ARTIFACT_REGISTRY }}/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO }}/${{ matrix.service.name }}:${{ steps.sha.outputs.short }}
+            ${{ env.ARTIFACT_REGISTRY }}/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO }}/${{ matrix.service.name }}:latest
+          # Layer cache via Buildx — registry-backed so it survives runners
+          cache-from: type=registry,ref=${{ env.ARTIFACT_REGISTRY }}/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO }}/${{ matrix.service.name }}:buildcache
+          cache-to:   type=registry,ref=${{ env.ARTIFACT_REGISTRY }}/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPO }}/${{ matrix.service.name }}:buildcache,mode=max
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    env:
+      SHA: ${{ needs.build-and-push.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Install gke-gcloud-auth-plugin
+        run: gcloud components install gke-gcloud-auth-plugin --quiet
+
+      - name: Get cluster credentials
+        run: |
+          gcloud container clusters get-credentials $GKE_CLUSTER \
+            --region $GCP_REGION \
+            --project ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Roll out new image to each Deployment
+        run: |
+          IMG_PREFIX="${ARTIFACT_REGISTRY}/${{ secrets.GCP_PROJECT_ID }}/${REPO}"
+          set -eo pipefail
+
+          for svc in ingest-api auth-service stream-processor anomaly-consumer dashboard; do
+            echo "::group::set image $svc"
+            kubectl -n $K8S_NAMESPACE set image \
+              deployment/$svc $svc=$IMG_PREFIX/$svc:$SHA --record
+            echo "::endgroup::"
+          done
+
+      - name: Wait for rollouts
+        id: rollout
+        run: |
+          set -eo pipefail
+          for svc in ingest-api auth-service stream-processor anomaly-consumer dashboard; do
+            kubectl -n $K8S_NAMESPACE rollout status deployment/$svc --timeout=300s
+          done
+
+      - name: Auto-rollback on failure
+        if: failure() && steps.rollout.outcome == 'failure'
+        run: |
+          echo "Rollout failed, undoing every deployment..."
+          for svc in ingest-api auth-service stream-processor anomaly-consumer dashboard; do
+            kubectl -n $K8S_NAMESPACE rollout undo deployment/$svc || true
+          done
+          exit 1

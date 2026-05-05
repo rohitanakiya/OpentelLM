@@ -1,0 +1,62 @@
+{
+  "name": "opentelm-node",
+  "version": "0.1.0",
+  "description": "Zero-config observability SDK for LLM apps. Auto-instruments OpenAI and Anthropic calls.",
+  "keywords": [
+    "llm",
+    "observability",
+    "openai",
+    "anthropic",
+    "opentelemetry",
+    "monitoring"
+  ],
+  "homepage": "https://github.com/yourorg/opentelm",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yourorg/opentelm.git",
+    "directory": "sdk/nodejs"
+  },
+  "bugs": {
+    "url": "https://github.com/yourorg/opentelm/issues"
+  },
+  "license": "MIT",
+  "main":   "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types":  "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types":   "./dist/index.d.ts",
+      "import":  "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build":      "tsup src/index.ts --format cjs,esm --dts --clean",
+    "test":       "vitest run",
+    "test:watch": "vitest",
+    "lint":       "tsc --noEmit",
+    "prepublishOnly": "npm run lint && npm run test && npm run build"
+  },
+  "peerDependencies": {
+    "openai": ">=4.0.0",
+    "@anthropic-ai/sdk": ">=0.20.0"
+  },
+  "peerDependenciesMeta": {
+    "openai": { "optional": true },
+    "@anthropic-ai/sdk": { "optional": true }
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.12",
+    "tsup": "^8.0.2",
+    "typescript": "^5.4.5",
+    "vitest": "^1.6.0"
+  }
+}

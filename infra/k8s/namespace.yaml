@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: opentelm
+  labels:
+    app.kubernetes.io/name: opentelm
+---
+# K8s ServiceAccount used by every workload pod. Annotated with the GCP
+# runtime SA email so Workload Identity binds them. Put the value from
+# `terraform output runtime_service_account` here.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: opentelm-app
+  namespace: opentelm
+  annotations:
+    iam.gke.io/gcp-service-account: REPLACE_WITH_TF_OUTPUT_runtime_service_account

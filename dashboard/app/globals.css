@@ -1,0 +1,55 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html, body {
+  background: #0f1117;
+  color: #e7e9f4;
+  font-family: Inter, system-ui, sans-serif;
+  min-height: 100%;
+}
+
+* {
+  border-color: #2a2d44;
+}
+
+/* Subtle gradient border used by stat cards */
+.gradient-border {
+  position: relative;
+  background: #1a1d2e;
+  border-radius: 12px;
+}
+.gradient-border::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 12px;
+  padding: 1px;
+  background: linear-gradient(135deg, #7c3aed55, #0ea5e955 50%, #1a1d2e);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+          mask-composite: exclude;
+  pointer-events: none;
+}
+
+/* Skeleton shimmer */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.skeleton {
+  background: linear-gradient(90deg, #22253a 0%, #2a2d44 50%, #22253a 100%);
+  background-size: 200% 100%;
+  animation: shimmer 1.4s linear infinite;
+  border-radius: 8px;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: #0f1117; }
+::-webkit-scrollbar-thumb { background: #2a2d44; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #3a3d54; }

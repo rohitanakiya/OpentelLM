@@ -1,0 +1,51 @@
+name: Destroy infrastructure
+
+# MANUAL ONLY. Will fully tear down the GKE cluster, Cloud SQL instance,
+# Memorystore instance, VPC, and all IAM resources. Use only when wiping
+# a project.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type DESTROY to confirm'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  destroy:
+    if: github.event.inputs.confirm == 'DESTROY'
+    # Requires the "production" GitHub Environment to be configured with
+    # required reviewers — gives a second human approval step before any
+    # provider call. Without this, a single compromised actor could nuke
+    # everything.
+    environment: production
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.6.0"
+
+      - name: terraform init
+        working-directory: infra/terraform
+        run: |
+          terraform init \
+            -backend-config="bucket=opentelm-tfstate-${{ secrets.GCP_PROJECT_ID }}" \
+            -backend-config="prefix=infra"
+
+      - name: terraform destroy
+        working-directory: infra/terraform
+        env:
+          TF_VAR_project_id:  ${{ secrets.GCP_PROJECT_ID }}
+          TF_VAR_github_repo: ${{ github.repository }}
+        run: terraform destroy -auto-approve

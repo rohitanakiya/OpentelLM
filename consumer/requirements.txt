@@ -1,0 +1,4 @@
+aiokafka==0.10.0
+pydantic-settings==2.2.1
+clickhouse-driver==0.2.7
+python-dotenv==1.0.1

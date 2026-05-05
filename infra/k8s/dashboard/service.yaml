@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: dashboard
+  namespace: opentelm
+  annotations:
+    # GKE BackendConfig binds session affinity for the WebSocket upgrade.
+    cloud.google.com/backend-config: '{"default": "dashboard-bc"}'
+spec:
+  type: ClusterIP
+  selector:
+    app: dashboard
+  # Session affinity → a browser tab keeps hitting the same pod. Without
+  # this, the initial HTTP request and the WS upgrade can land on
+  # different pods, breaking the in-pod loopback rewrite.
+  sessionAffinity: ClientIP
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+# BackendConfig tunes the GCP HTTP(S) load balancer behind the Ingress.
+# Long timeout to keep WebSocket connections from being killed.
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: dashboard-bc
+  namespace: opentelm
+spec:
+  timeoutSec: 3600
+  connectionDraining:
+    drainingTimeoutSec: 30

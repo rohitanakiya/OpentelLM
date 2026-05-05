@@ -1,0 +1,11 @@
+# Source / config / dev artefacts never go into the published tarball.
+# package.json "files" is allow-list — this is belt-and-braces.
+src/
+test/
+tsconfig.json
+.eslintrc*
+vitest.config*
+.github/
+*.tsbuildinfo
+node_modules/
+coverage/

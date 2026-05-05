@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dashboard
+  namespace: opentelm
+  labels:
+    app: dashboard
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  selector:
+    matchLabels:
+      app: dashboard
+  template:
+    metadata:
+      labels:
+        app: dashboard
+    spec:
+      serviceAccountName: opentelm-app
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: dashboard
+          image: REPLACE_AT_DEPLOY_TIME/dashboard:latest
+          imagePullPolicy: Always
+          # 3000 = Next.js, 3001 = standalone WebSocket server.
+          # The WS server runs in the same pod (sidecar-style via the same
+          # container) — see Dockerfile CMD: `node ws-server.mjs & node server.js`.
+          # Sticky sessions on the Service ensure a browser's WS upgrade
+          # lands on the same pod its HTTP request did.
+          ports:
+            - name: http
+              containerPort: 3000
+            - name: ws
+              containerPort: 3001
+          envFrom:
+            - configMapRef: { name: opentelm-config }
+            - secretRef:    { name: opentelm-secrets }
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits:   { cpu: 500m, memory: 512Mi }
+          readinessProbe:
+            httpGet: { path: /login, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /login, port: http }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }

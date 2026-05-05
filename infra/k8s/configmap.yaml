@@ -1,0 +1,42 @@
+# Non-secret configuration. Anything sensitive (passwords, JWT secret,
+# API key pepper, Confluent credentials) lives in opentelm-secrets, NOT
+# here. ConfigMaps are world-readable inside the namespace.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: opentelm-config
+  namespace: opentelm
+data:
+  # Kafka — Confluent Cloud bootstrap. The actual key/secret are in the secret.
+  KAFKA_TOPIC: "llm.requests"
+  ANOMALIES_TOPIC: "llm.anomalies"
+
+  # ClickHouse — Cloud endpoint host:port. Auth in secret.
+  CLICKHOUSE_DB: "opentelm"
+
+  # Service ports (must match container ports below)
+  INGEST_API_PORT: "8000"
+  AUTH_SERVICE_PORT: "8001"
+
+  # Auth service config
+  JWT_ALGORITHM: "HS256"
+  ACCESS_TOKEN_EXPIRE_MINUTES: "15"
+  REFRESH_TOKEN_EXPIRE_DAYS: "7"
+  APIKEY_CACHE_TTL_S: "86400"
+
+  # Stream-processor tuning
+  METRICS_WINDOW_S: "60"
+  METRICS_REDIS_TTL_S: "90"
+  EMA_ALPHA: "0.05"
+  COST_SPIKE_MULTIPLIER: "3.0"
+  ANOMALY_DEDUP_TTL_S: "3600"
+  REGRESSION_MIN_SAMPLES: "50"
+  REGRESSION_COMPARE_EVERY_N: "100"
+
+  # Dashboard
+  NEXT_PUBLIC_APP_NAME: "OpenTelLM"
+  WS_INTERNAL_URL: "http://localhost:3001"
+
+  # Inter-service URLs (cluster-internal DNS)
+  AUTH_SERVICE_URL: "http://auth-service.opentelm.svc.cluster.local:8001"

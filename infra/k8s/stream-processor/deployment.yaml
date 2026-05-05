@@ -1,0 +1,57 @@
+# Stream-processor: 1 replica.
+#
+# Multiple replicas are SAFE — each Kafka consumer group rebalances
+# partitions automatically. We start with 1 because Confluent Cloud's free
+# tier has a hard partition-count cap, and three consumer groups (metrics,
+# anomaly, regression) × N replicas eats into that budget fast. Bump to 2+
+# when you're past the free tier.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stream-processor
+  namespace: opentelm
+  labels:
+    app: stream-processor
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate  # No HTTP traffic to drain; Recreate is cleaner than rolling
+  selector:
+    matchLabels:
+      app: stream-processor
+  template:
+    metadata:
+      labels:
+        app: stream-processor
+    spec:
+      serviceAccountName: opentelm-app
+      # Phase 3 SIGTERM handler drains windows + commits offsets. Give it
+      # enough time to flush a 60s window if shutdown lands mid-window.
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: stream-processor
+          image: REPLACE_AT_DEPLOY_TIME/stream-processor:latest
+          imagePullPolicy: Always
+          envFrom:
+            - configMapRef: { name: opentelm-config }
+            - secretRef:    { name: opentelm-secrets }
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits:   { cpu: 500m, memory: 512Mi }
+          # The healthcheck script we wrote in Phase 3 uses kafka admin to
+          # confirm the metrics-aggregator group is registered.
+          livenessProbe:
+            exec:
+              command: ["python", "/app/healthcheck.py"]
+            initialDelaySeconds: 60
+            periodSeconds: 60
+            timeoutSeconds: 15
+            failureThreshold: 3
+          # No readinessProbe — there's no Service in front, so K8s never
+          # needs to gate traffic on this container being "ready".
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }

@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: anomaly-consumer
+  namespace: opentelm
+  labels:
+    app: anomaly-consumer
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: anomaly-consumer
+  template:
+    metadata:
+      labels:
+        app: anomaly-consumer
+    spec:
+      serviceAccountName: opentelm-app
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: anomaly-consumer
+          image: REPLACE_AT_DEPLOY_TIME/anomaly-consumer:latest
+          imagePullPolicy: Always
+          envFrom:
+            - configMapRef: { name: opentelm-config }
+            - secretRef:    { name: opentelm-secrets }
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits:   { cpu: 500m, memory: 512Mi }
+          # No HTTP endpoint and no in-process state worth health-checking
+          # beyond "is the process alive". K8s default liveness (process
+          # restart on exit) is sufficient.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }

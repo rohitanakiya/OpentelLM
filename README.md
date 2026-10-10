@@ -205,6 +205,22 @@ The non-obvious calls. Every one of these is an interview talking point.
   fired every hour for every active project. Unit tests now cover the "must
   stay quiet" cases, not only the "must fire" ones.
 
+- **Prompt regressions need significance AND size, with peeking controlled.**
+  Each tagged version (`opentelm.set_version("v2")`) is compared with the
+  version first seen before it. Error rate uses a one-sided two-proportion
+  z-test, falling back to Fisher's exact test when counts are too small
+  for the normal approximation. Latency uses a one-sided Mann-Whitney U
+  test on successful calls, which is rank-based, so a few timeouts can't
+  dominate. An alert needs p below the threshold AND a meaningful change
+  (+2 points of error rate, or +20% median latency). Re-testing as data
+  arrives inflates false alarms: a fixed p < 0.01 checked every 50
+  requests alerted on ~4% of simulated no-change deploys. So tests run at
+  50, 100, 200, ... requests, and look k gets alpha / 2^(k+1). The total
+  stays under 1% however long a version runs (~1% measured), while 2%→6%
+  error rates and +50% latency are still caught in 100/100 simulations.
+  The statistics are ~100 lines of pure Python, checked against scipy in
+  the tests, rather than a ~100 MB scipy dependency.
+
 - **T-Digest for percentiles, not a sorted list.** Storing every latency
   value in memory grows unbounded with traffic. T-Digest is O(1) memory
   per (tenant, project, model, window) with bounded percentile error.

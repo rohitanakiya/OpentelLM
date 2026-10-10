@@ -2,7 +2,7 @@
 
 import { CheckCircle2, AlertTriangle, AlertOctagon } from "lucide-react";
 import { useEffect, useState } from "react";
-import { fmtCost, fmtPct, fmtRelative } from "@/lib/format";
+import { fmtCost, fmtMs, fmtPct, fmtRelative } from "@/lib/format";
 import { CardListSkeleton } from "./skeletons";
 import { ErrorState, EmptyState } from "./error-state";
 
@@ -107,18 +107,42 @@ function AlertDetails({ alert }: { alert: Alert }) {
     );
   }
   const d = alert.details as {
+    metric?: "error_rate" | "latency"; // absent on alerts from the old detector
     current_version?: string;
     previous_version?: string;
+    baseline_value?: number;
+    current_value?: number;
+    p_value?: number;
     error_rate_delta?: number;
     latency_delta_pct?: number;
   };
+  const change =
+    d.metric === "latency"
+      ? `${fmtMs(d.baseline_value ?? 0)} → ${fmtMs(d.current_value ?? 0)} median`
+      : d.metric === "error_rate"
+        ? `${fmtPct(d.baseline_value ?? 0)} → ${fmtPct(d.current_value ?? 0)} errors`
+        : null;
   return (
     <div className="text-sm mt-2 grid grid-cols-2 gap-4 max-w-md">
       <Detail label="versions"   value={`${d.previous_version ?? "?"} → ${d.current_version ?? "?"}`} />
-      <Detail label="error Δ"    value={fmtPct(d.error_rate_delta ?? 0)} />
-      <Detail label="latency Δ"  value={fmtPct(d.latency_delta_pct ?? 0)} />
+      {change ? (
+        <>
+          <Detail label={d.metric === "latency" ? "latency" : "error rate"} value={change} />
+          <Detail label="p-value" value={fmtPValue(d.p_value)} />
+        </>
+      ) : (
+        <>
+          <Detail label="error Δ"    value={fmtPct(d.error_rate_delta ?? 0)} />
+          <Detail label="latency Δ"  value={fmtPct(d.latency_delta_pct ?? 0)} />
+        </>
+      )}
     </div>
   );
+}
+
+function fmtPValue(p?: number): string {
+  if (p === undefined) return "–";
+  return p < 0.0001 ? "< 0.0001" : p.toPrecision(2);
 }
 
 function Detail({ label, value }: { label: string; value: string }) {

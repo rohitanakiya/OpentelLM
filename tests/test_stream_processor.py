@@ -86,8 +86,10 @@ def _hex64(s: str) -> str:
     return hashlib.sha256(s.encode()).hexdigest()
 
 
-def _event(model: str = "gpt-4o", *, prompt_tokens=10, completion_tokens=5, status="success"):
+def _event(model: str = "gpt-4o", *, prompt_tokens=10, completion_tokens=5, status="success",
+           version: str | None = None):
     return {
+        "deployment_version": version,
         "model": model,
         "provider": "openai",
         "prompt_tokens": prompt_tokens,
@@ -257,6 +259,35 @@ async def test_anomaly_deduplication(
     assert len(cost_spikes_for_proj) == 1, (
         f"Expected exactly 1 dedup'd cost_spike for project, got {len(cost_spikes_for_proj)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 4b. Prompt regression: clean v1 -> v2 cutover where v2 breaks
+#     (the previous detector could never fire on this)
+# ---------------------------------------------------------------------------
+async def test_prompt_regression_fires_on_clean_cutover(
+    ingest_client, tenant_setup, redis_client,
+):
+    tenant_id, project_id, raw_key, _ = tenant_setup
+    await redis_client.delete(f"alerts:{tenant_id}")
+
+    await _ingest(ingest_client, raw_key, [_event(version="v1") for _ in range(100)])
+    await asyncio.sleep(0.1)  # v1 must be first seen before v2
+    v2 = [_event(version="v2", status="error" if i % 3 == 0 else "success") for i in range(60)]
+    await _ingest(ingest_client, raw_key, v2)
+
+    deadline = time.monotonic() + 30
+    found: list[dict] = []
+    while time.monotonic() < deadline and not found:
+        items = await redis_client.lrange(f"alerts:{tenant_id}", 0, -1)
+        found = [j for i in items if (j := json.loads(i)).get("type") == "prompt_regression"]
+        if not found:
+            await asyncio.sleep(1)
+
+    assert found, "no prompt_regression alert within 30s"
+    d = found[0]["details"]
+    assert (d["previous_version"], d["current_version"]) == ("v1", "v2")
+    assert d["metric"] == "error_rate"
 
 
 # ---------------------------------------------------------------------------

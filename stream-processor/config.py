@@ -28,11 +28,14 @@ class Settings(BaseSettings):
     cost_spike_min_usd: float = 1.0
     anomaly_dedup_ttl_s: int = 3600
 
-    # Prompt regression thresholds
-    regression_min_samples: int = 50
-    regression_compare_every_n: int = 100
-    regression_error_rate_delta: float = 0.10   # 10 percentage points
-    regression_latency_delta_pct: float = 0.40  # 40%
+    # Prompt regression (see consumers/regression.py). A regression needs BOTH
+    # statistical significance (p < alpha) AND a practically meaningful size.
+    regression_min_samples: int = 50            # per version; looks at 50, 100, 200, 400, ...
+    regression_alpha: float = 0.01              # total false-alarm budget per version
+    regression_error_rate_delta: float = 0.02   # min error-rate increase (2 percentage points)
+    regression_latency_delta_pct: float = 0.20  # min median-latency increase (20%)
+    regression_latency_samples: int = 1000      # latency samples kept per version
+    regression_state_ttl_s: int = 14 * 24 * 3600
 
     class Config:
         env_file = ".env"

@@ -16,7 +16,7 @@ import httpx
 import pytest
 import pytest_asyncio
 
-from conftest import AUTH_URL  # registered via Phase 2/3 conftest
+from tests.conftest import AUTH_URL  # registered via Phase 2/3 conftest
 
 DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "http://localhost:3000")
 

@@ -44,6 +44,18 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 5
+      # Single-node KRaft broker. The image's default advertised listener is
+      # PLAINTEXT://localhost:9092, which matches the port mapping, and topic
+      # auto-creation is on, so llm.requests is created on first publish.
+      kafka:
+        image: apache/kafka:3.8.0
+        ports: ["9092:9092"]
+        options: >-
+          --health-cmd "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092"
+          --health-interval 10s
+          --health-timeout 10s
+          --health-retries 12
+          --health-start-period 15s
 
     steps:
       - uses: actions/checkout@v4
@@ -57,8 +69,8 @@ jobs:
         env:
           PGPASSWORD: opentelm
         run: |
-          sudo apt-get install -y postgresql-client
-          psql -h localhost -U opentelm -d opentelm -f infra/postgres/schema.sql
+          psql --version || (sudo apt-get update && sudo apt-get install -y postgresql-client)
+          psql -v ON_ERROR_STOP=1 -h localhost -U opentelm -d opentelm -f infra/postgres/schema.sql
 
       - name: Install service requirements + test deps
         run: |
@@ -74,18 +86,21 @@ jobs:
           # CI-only secrets — non-sensitive
           JWT_SECRET_KEY: ci-jwt-secret-32-chars-of-padding-padding
           API_KEY_PEPPER: ci-pepper
-          # Stub Kafka (the isolation tests don't actually verify Kafka payloads,
-          # the ingest-api can't reach a broker — that's fine for these tests
-          # because publish is the last step after auth/permission checks)
           KAFKA_BOOTSTRAP_SERVERS: localhost:9092
         run: |
-          (cd auth-service && uvicorn main:app --host 0.0.0.0 --port 8001) &
-          (cd ingest-api  && uvicorn main:app --host 0.0.0.0 --port 8000) &
-          # Wait for both health endpoints
+          (cd auth-service && nohup uvicorn main:app --host 0.0.0.0 --port 8001 > /tmp/auth-service.log 2>&1 &)
+          (cd ingest-api  && nohup uvicorn main:app --host 0.0.0.0 --port 8000 > /tmp/ingest-api.log 2>&1 &)
+          # Wait for both health endpoints. Fail loudly: if the services never
+          # come up, conftest would otherwise SKIP every test and the job
+          # would go green without testing anything.
           for i in $(seq 1 30); do
-            curl -fsS http://localhost:8001/health && curl -fsS http://localhost:8000/health && break
+            if curl -fsS http://localhost:8001/health && curl -fsS http://localhost:8000/health; then
+              exit 0
+            fi
             sleep 1
           done
+          echo "::error::auth-service / ingest-api did not become healthy"
+          exit 1
 
       - name: Run isolation tests
         env:
@@ -94,6 +109,12 @@ jobs:
           TEST_POSTGRES_DSN: postgresql://opentelm:opentelm@localhost:5432/opentelm
           REDIS_URL: redis://localhost:6379/0
         run: pytest tests/test_isolation.py -v
+
+      - name: Service logs
+        if: failure()
+        run: |
+          echo "::group::auth-service"; cat /tmp/auth-service.log || true; echo "::endgroup::"
+          echo "::group::ingest-api";   cat /tmp/ingest-api.log   || true; echo "::endgroup::"
 
       # The stream-processor tests need Kafka and ClickHouse, which we'd
       # need to spin up here. Skipping in CI — they're run nightly via the

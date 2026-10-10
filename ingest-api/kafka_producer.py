@@ -13,7 +13,7 @@ _producer: AIOKafkaProducer | None = None
 async def get_producer() -> AIOKafkaProducer:
     global _producer
     if _producer is None:
-        _producer = AIOKafkaProducer(
+        producer = AIOKafkaProducer(
             bootstrap_servers=settings.kafka_bootstrap_servers,
             value_serializer=lambda v: json.dumps(v).encode(),
             compression_type="gzip",
@@ -23,7 +23,18 @@ async def get_producer() -> AIOKafkaProducer:
             acks=1,
             request_timeout_ms=5_000,
         )
-        await _producer.start()
+        try:
+            await producer.start()
+        except Exception:
+            # Only cache a producer that actually connected. Caching a failed
+            # one would keep every later request failing even after Kafka
+            # comes back.
+            try:
+                await producer.stop()
+            except Exception:
+                pass
+            raise
+        _producer = producer
     return _producer
 
 

@@ -19,7 +19,7 @@ import uuid
 
 import pytest
 
-from conftest import AUTH_URL, INGEST_URL  # noqa: F401  (used implicitly by fixtures)
+from tests.conftest import AUTH_URL, INGEST_URL  # noqa: F401  (used implicitly by fixtures)
 
 pytestmark = pytest.mark.asyncio
 

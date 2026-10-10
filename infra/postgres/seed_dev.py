@@ -59,7 +59,7 @@ async def seed():
     await conn.close()
     print(f"Tenant ID  : {tenant_id}")
     print(f"Project ID : {project_id}")
-    print(f"Login      : dev@example.com / devpassword")
+    print("Login      : dev@example.com / devpassword")
     print(f"API Key    : {raw_key}")
     print("\nPass the API Key to smoke_test.py --api-key <key>")
 

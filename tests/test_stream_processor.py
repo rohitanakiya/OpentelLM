@@ -17,14 +17,11 @@ import os
 import time
 import uuid
 
-import asyncpg
 import httpx
 import pytest
 import pytest_asyncio
 import redis.asyncio as aioredis
 from clickhouse_driver import Client as ClickHouseClient
-
-from conftest import AUTH_URL, INGEST_URL, TEST_DSN
 
 pytestmark = pytest.mark.asyncio
 
@@ -170,9 +167,8 @@ async def test_cost_spike_anomaly_fires(
     # Clear any stale alerts from previous runs
     await redis_client.delete(f"alerts:{tenant_id}")
 
-    big_event = lambda: _event(
-        "claude-3-opus", prompt_tokens=50_000, completion_tokens=20_000,
-    )
+    def big_event():
+        return _event("claude-3-opus", prompt_tokens=50_000, completion_tokens=20_000)
     await _ingest(ingest_client, raw_key, [big_event() for _ in range(20)])
 
     # The detector + persister chain is fast (no window wait); poll for up to 30s
@@ -203,7 +199,8 @@ async def test_anomaly_deduplication(
     await redis_client.delete(f"anomaly_fired:{tenant_id}:{project_id}")
     await redis_client.delete(f"alerts:{tenant_id}")
 
-    big_event = lambda: _event("claude-3-opus", prompt_tokens=50_000, completion_tokens=20_000)
+    def big_event():
+        return _event("claude-3-opus", prompt_tokens=50_000, completion_tokens=20_000)
 
     # First burst — should trigger one alert
     await _ingest(ingest_client, raw_key, [big_event() for _ in range(20)])

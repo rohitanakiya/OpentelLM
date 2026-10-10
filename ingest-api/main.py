@@ -117,7 +117,15 @@ async def ingest(
         d["timestamp_ms"] = d["timestamp_ms"] or now_ms
         enriched.append(d)
 
-    await publish_events(enriched)
+    try:
+        await publish_events(enriched)
+    except Exception:
+        # The SDKs retry on 5xx, so a clear 503 is more useful than a bare 500.
+        logger.exception("ingest: failed to publish %d events to Kafka", len(enriched))
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"error": "event_bus_unavailable"},
+        )
 
     return IngestResponse(
         accepted=len(enriched),

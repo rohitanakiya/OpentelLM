@@ -46,26 +46,31 @@ TEST_DSN   = os.environ.get(
 # ---------------------------------------------------------------------------
 # Reachability gate
 # ---------------------------------------------------------------------------
-@pytest_asyncio.fixture(scope="session", autouse=True)
-async def _services_up():
-    """Skip the entire test module if the services aren't running."""
-    async with httpx.AsyncClient(timeout=2.0) as client:
-        try:
-            r1 = await client.get(f"{AUTH_URL}/health")
-            r2 = await client.get(f"{INGEST_URL}/health")
-            if r1.status_code != 200 or r2.status_code != 200:
-                pytest.skip("auth-service or ingest-api /health not 200")
-        except (httpx.HTTPError, OSError) as exc:
-            pytest.skip(
-                f"Services unreachable ({exc}). Run `docker compose up -d` first."
-            )
+@pytest.fixture(scope="session", autouse=True)
+def _services_up():
+    """Skip the entire test module if the services aren't running.
+
+    Deliberately synchronous: a session-scoped *async* fixture would be bound
+    to a different event loop than the function-scoped tests (pytest-asyncio
+    gives every test its own loop), which fails with "attached to a
+    different loop".
+    """
+    try:
+        r1 = httpx.get(f"{AUTH_URL}/health", timeout=2.0)
+        r2 = httpx.get(f"{INGEST_URL}/health", timeout=2.0)
+    except (httpx.HTTPError, OSError) as exc:
+        pytest.skip(f"Services unreachable ({exc}). Run `docker compose up -d` first.")
+    if r1.status_code != 200 or r2.status_code != 200:
+        pytest.skip("auth-service or ingest-api /health not 200")
 
 
 # ---------------------------------------------------------------------------
 # Postgres — used to wipe state between tests
 # ---------------------------------------------------------------------------
-@pytest_asyncio.fixture(scope="session")
+@pytest_asyncio.fixture
 async def pg_pool():
+    # Function-scoped for the same event-loop reason as above; a pool per
+    # test costs a few milliseconds.
     try:
         pool = await asyncpg.create_pool(TEST_DSN, min_size=1, max_size=4)
     except (OSError, asyncpg.PostgresError) as exc:

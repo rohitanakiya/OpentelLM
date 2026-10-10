@@ -22,9 +22,32 @@ env:
   K8S_NAMESPACE: opentelm
 
 jobs:
+  # Skip the whole deploy (instead of failing) until the GCP project exists
+  # and its secrets are configured. Job-level `if:` cannot read secrets
+  # directly, so a tiny job turns "is the secret set?" into an output.
+  check-config:
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      - id: check
+        env:
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+        run: |
+          if [ -n "$GCP_PROJECT_ID" ] && [ -n "$GCP_WORKLOAD_IDENTITY_PROVIDER" ] && [ -n "$GCP_SERVICE_ACCOUNT" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::GCP deploy secrets are not configured; skipping deploy. See README > Production deployment."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
   # Wait for CI to pass on this commit. We require the workflow run on
   # the same SHA to have succeeded — no merging to main while red.
   wait-for-ci:
+    needs: check-config
+    if: needs.check-config.outputs.enabled == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

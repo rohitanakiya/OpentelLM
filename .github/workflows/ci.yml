@@ -103,6 +103,42 @@ jobs:
           echo "test_stream_processor.py and test_dashboard.py require Kafka + ClickHouse + the dashboard image; they run locally against docker compose."
 
   # -------------------------------------------------------------------
+  # Python SDK — runs against the real openai / anthropic packages with a
+  # mocked HTTP transport. The matrix covers the newest releases on every
+  # supported Python, plus the oldest SDK releases we claim to support.
+  # -------------------------------------------------------------------
+  test-python-sdk:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { python: "3.10", sdks: "latest" }
+          - { python: "3.11", sdks: "latest" }
+          - { python: "3.12", sdks: "latest" }
+          - { python: "3.13", sdks: "latest" }
+          - { python: "3.11", sdks: "oldest" }
+    defaults:
+      run:
+        working-directory: sdk/python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - name: Install SDK + test deps
+        run: |
+          python -m pip install --upgrade pip
+          if [ "${{ matrix.sdks }}" = "oldest" ]; then
+            pip install -e . pytest pytest-asyncio "openai==1.40.0" "anthropic==0.34.0" "httpx<0.28"
+          else
+            pip install -e ".[test]"
+          fi
+      - name: pytest
+        run: python -m pytest -v
+
+  # -------------------------------------------------------------------
   # Dashboard build + typecheck
   # -------------------------------------------------------------------
   test-dashboard:

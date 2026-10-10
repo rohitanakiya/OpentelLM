@@ -9,9 +9,9 @@ import argparse
 import hashlib
 import json
 import time
+import urllib.error
+import urllib.request
 import uuid
-
-import httpx
 
 
 def sha256(text: str) -> str:
@@ -30,20 +30,25 @@ def send_event(api_key: str, endpoint: str = "http://localhost:8000") -> None:
         "status": "success",
         "prompt_hash": sha256("What is the capital of France?"),
         "response_hash": sha256("The capital of France is Paris."),
-        "sdk_version": "0.1.0",
+        "sdk_version": "smoke-test",
         "deployment_version": "smoke-test-v1",
         "tags": {"env": "local"},
         "timestamp_ms": int(time.time() * 1000),
     }
 
-    resp = httpx.post(
+    req = urllib.request.Request(
         f"{endpoint}/v1/ingest",
-        json={"events": [event]},
-        headers={"Authorization": f"Bearer {api_key}"},
-        timeout=10.0,
+        data=json.dumps({"events": [event]}).encode(),
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
     )
-    print(f"Status: {resp.status_code}")
-    print(json.dumps(resp.json(), indent=2))
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            status, body = resp.status, resp.read()
+    except urllib.error.HTTPError as err:
+        status, body = err.code, err.read()
+    print(f"Status: {status}")
+    print(json.dumps(json.loads(body or b"{}"), indent=2))
 
 
 if __name__ == "__main__":

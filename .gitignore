@@ -19,3 +19,8 @@ infra/terraform/.terraform/
 infra/terraform/.terraform.lock.hcl
 infra/terraform/*.tfstate
 infra/terraform/*.tfstate.backup
+
+# Files Claude hands over for protected paths (e.g. .github/workflows/) are
+# downloaded here first. Move them into place with
+# scripts/apply-claude-outputs.sh; never commit the folder itself.
+Claude outputs/

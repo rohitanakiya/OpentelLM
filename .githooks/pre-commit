@@ -1,0 +1,14 @@
+#!/bin/sh
+# Refuse to commit while files from Claude are still waiting in
+# "Claude outputs/": they belong somewhere else in the repo (usually
+# .github/workflows/), and committing without them silently ships the old
+# version. Enable once per clone with:  git config core.hooksPath .githooks
+root="$(git rev-parse --show-toplevel)"
+inbox="$root/Claude outputs"
+if [ -d "$inbox" ] && [ -n "$(find "$inbox" -type f 2>/dev/null | head -n 1)" ]; then
+  echo "pre-commit: files from Claude are still waiting in \"Claude outputs/\":" >&2
+  find "$inbox" -type f | sed 's|^|  |' >&2
+  echo "Run: bash scripts/apply-claude-outputs.sh   (then git add -A and commit again)" >&2
+  exit 1
+fi
+exit 0

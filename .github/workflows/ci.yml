@@ -124,6 +124,28 @@ jobs:
           echo "test_stream_processor.py and test_dashboard.py require Kafka + ClickHouse + the dashboard image; they run locally against docker compose."
 
   # -------------------------------------------------------------------
+  # Stream-processor unit tests — detector logic against fakeredis, so no
+  # Kafka / ClickHouse needed. Python version matches the service image.
+  # -------------------------------------------------------------------
+  test-stream-processor:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: stream-processor
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+      - name: pytest
+        run: python -m pytest -v
+
+  # -------------------------------------------------------------------
   # Python SDK — runs against the real openai / anthropic packages with a
   # mocked HTTP transport. The matrix covers the newest releases on every
   # supported Python, plus the oldest SDK releases we claim to support.

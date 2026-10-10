@@ -94,13 +94,14 @@ function AlertDetails({ alert }: { alert: Alert }) {
   if (alert.type === "cost_spike") {
     const d = alert.details as {
       current_hour_cost_usd?: number;
-      ema_baseline_usd?: number;
+      baseline_hourly_usd?: number;
+      ema_baseline_usd?: number; // alerts stored before the hourly-baseline detector
       multiplier?: number;
     };
     return (
       <div className="text-sm mt-2 grid grid-cols-3 gap-4 max-w-md">
         <Detail label="this hour"   value={fmtCost(d.current_hour_cost_usd ?? 0)} />
-        <Detail label="baseline"    value={fmtCost(d.ema_baseline_usd ?? 0)} />
+        <Detail label="usual hour"  value={fmtCost(d.baseline_hourly_usd ?? d.ema_baseline_usd ?? 0)} />
         <Detail label="multiplier"  value={`${(d.multiplier ?? 0).toFixed(1)}×`} />
       </div>
     );

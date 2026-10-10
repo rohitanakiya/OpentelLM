@@ -192,11 +192,18 @@ The non-obvious calls. Every one of these is an interview talking point.
   rewrites `/api/ws/*` to `:3001`, which runs `ws-server.mjs`. Browsers
   see one origin; Kubernetes sees two ports on the same pod.
 
-- **EMA cost baseline persisted in Redis.** A service restart must not
-  reset the anomaly baseline — otherwise every restart trips a "spike" the
-  next time real traffic arrives. The state lives in `ema:{tenant}:{project}`,
-  read lazily on first event after startup, written back via pipeline
-  after every event.
+- **Cost spikes compare an hour with other hours.** An alert fires when a
+  project's spend so far this hour is more than 3x its usual hour. "Usual"
+  means the average of the hours that had traffic among the previous 24, not
+  a plain 24-hour average. A project busy only during office hours would
+  otherwise have a baseline of about a third of a normal hour, and every
+  working hour would look like a spike. Two floors stop noise: at least
+  3 hours of history (so new projects don't alert), and at least $1 spent
+  this hour. Hourly totals live in Redis (`hourcost:{tenant}:{project}:{hour}`,
+  26h TTL), so restarts and extra replicas need no warm-up. The first
+  version compared a whole hour's spend with the cost of a single call and
+  fired every hour for every active project. Unit tests now cover the "must
+  stay quiet" cases, not only the "must fire" ones.
 
 - **T-Digest for percentiles, not a sorted list.** Storing every latency
   value in memory grows unbounded with traffic. T-Digest is O(1) memory

@@ -99,6 +99,17 @@ def _event(model: str = "gpt-4o", *, prompt_tokens=10, completion_tokens=5, stat
     }
 
 
+async def _seed_hourly_baseline(redis_client, tenant_id: str, project_id: str, usd_per_hour: float):
+    """Pretend the project spent `usd_per_hour` in each of the previous 24
+    hours (the anomaly detector's baseline window, see consumers/anomaly.py)."""
+    this_hour = int(time.time()) // 3600
+    pipe = redis_client.pipeline()
+    for h in range(this_hour - 24, this_hour):
+        key = f"hourcost:{tenant_id}:{project_id}:{h}"
+        pipe.set(key, str(usd_per_hour).encode(), ex=26 * 3600)
+    await pipe.execute()
+
+
 async def _ingest(ingest_client: httpx.AsyncClient, raw_key: str, events: list[dict]):
     r = await ingest_client.post(
         "/v1/ingest",
@@ -160,10 +171,8 @@ async def test_cost_spike_anomaly_fires(
 ):
     tenant_id, project_id, raw_key, _ = tenant_setup
 
-    # Seed an artificially low EMA so any meaningful cost trips the threshold.
-    await redis_client.set(f"ema:{tenant_id}:{project_id}", b"0.001")
-    # Clear dedup so the alert is allowed to fire
-    await redis_client.delete(f"anomaly_fired:{tenant_id}:{project_id}")
+    # A quiet history ($0.10/h) so the 20 big calls below (~$45) are a spike.
+    await _seed_hourly_baseline(redis_client, tenant_id, project_id, 0.10)
     # Clear any stale alerts from previous runs
     await redis_client.delete(f"alerts:{tenant_id}")
 
@@ -188,6 +197,27 @@ async def test_cost_spike_anomaly_fires(
 
 
 # ---------------------------------------------------------------------------
+# 3b. Normal traffic does NOT fire (the previous detector failed this)
+# ---------------------------------------------------------------------------
+async def test_normal_traffic_does_not_fire(
+    ingest_client, tenant_setup, redis_client,
+):
+    tenant_id, project_id, raw_key, _ = tenant_setup
+    # This project normally spends ~$100/h, so ~$45 this hour is unremarkable.
+    await _seed_hourly_baseline(redis_client, tenant_id, project_id, 100.0)
+    await redis_client.delete(f"alerts:{tenant_id}")
+
+    await _ingest(ingest_client, raw_key, [
+        _event("claude-3-opus", prompt_tokens=50_000, completion_tokens=20_000)
+        for _ in range(20)
+    ])
+
+    await asyncio.sleep(10)  # well past the detector's normal latency
+    items = await redis_client.lrange(f"alerts:{tenant_id}", 0, -1)
+    assert not [i for i in items if json.loads(i).get("type") == "cost_spike"]
+
+
+# ---------------------------------------------------------------------------
 # 4. Anomaly deduplication (one alert per tenant/project per hour)
 # ---------------------------------------------------------------------------
 async def test_anomaly_deduplication(
@@ -195,8 +225,7 @@ async def test_anomaly_deduplication(
 ):
     tenant_id, project_id, raw_key, _ = tenant_setup
 
-    await redis_client.set(f"ema:{tenant_id}:{project_id}", b"0.001")
-    await redis_client.delete(f"anomaly_fired:{tenant_id}:{project_id}")
+    await _seed_hourly_baseline(redis_client, tenant_id, project_id, 0.10)
     await redis_client.delete(f"alerts:{tenant_id}")
 
     def big_event():
@@ -238,8 +267,7 @@ async def test_anomaly_written_to_clickhouse(
 ):
     tenant_id, project_id, raw_key, _ = tenant_setup
 
-    await redis_client.set(f"ema:{tenant_id}:{project_id}", b"0.001")
-    await redis_client.delete(f"anomaly_fired:{tenant_id}:{project_id}")
+    await _seed_hourly_baseline(redis_client, tenant_id, project_id, 0.10)
 
     await _ingest(ingest_client, raw_key, [
         _event("claude-3-opus", prompt_tokens=50_000, completion_tokens=20_000)

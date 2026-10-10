@@ -1,31 +1,53 @@
 """
-anomaly-detector: cost-spike detection via exponential moving average.
+anomaly-detector: cost-spike detection against an hourly baseline.
 
-For each (tenant_id, project_id) we maintain:
-  - ema_baseline_usd     — long-running per-event cost EMA, persisted in Redis
-  - current_hour_cost    — accumulator for the current wall-clock hour, in Redis
+THE RULE
+--------
+For each (tenant_id, project_id), fire a `cost_spike` when ALL of:
 
-When current_hour_cost > multiplier * ema_baseline (and the baseline is
-non-trivial), publish a cost_spike anomaly to llm.anomalies.
+  1. the project had traffic in at least `cost_spike_min_baseline_hours`
+     of the 24 complete hours before the current one (no baseline, no alert:
+     a brand-new project must not alert on its first busy hour);
+  2. spend so far in the current hour >= `cost_spike_min_usd`
+     (nobody wants to be paged over 30 cents);
+  3. spend so far in the current hour > `cost_spike_multiplier` x baseline,
+     where baseline = average spend of the ACTIVE hours among those 24.
 
-PERSISTENCE
------------
-EMA state lives in Redis at  ema:{tenant}:{project}, value = float as bytes.
-We READ this value lazily (per-key) on first use after startup, and WRITE
-it back after every event. A service restart therefore does NOT reset the
-baseline — see _load_ema and the redis pipeline at the bottom of _process.
+Why active hours, not a plain 24-hour average: a project that only gets
+traffic during office hours spends nothing for ~16 hours a day. Dividing
+its spend by 24 would put the baseline at about a third of a normal busy
+hour, so every ordinary working hour would look like a 3x spike. Averaging
+over the hours that actually had traffic compares a busy hour with other
+busy hours.
 
-Dedup: alerts are deduped per (tenant, project) per hour via Redis key
-   anomaly_fired:{tenant}:{project}   TTL = 3600s
+The check runs on every event, against the running total of the current
+hour, so a runaway loop is flagged as soon as it crosses the threshold
+rather than when the hour ends.
+
+(The previous version compared this hour's TOTAL spend against an EMA of
+the cost of a SINGLE event. Any project making more than ~3 calls an hour
+crossed that line, so it fired every hour for every active project.)
+
+STATE (all in Redis, so restarts and extra replicas need no warm-up)
+-----
+  hourcost:{tenant}:{project}:{hour}    INCRBYFLOAT per event, TTL 26h
+                                        hour = Unix time // 3600, taken from
+                                        the event's own timestamp
+  anomaly_fired:{tenant}:{project}:{hour}   SET NX dedup, one alert per hour
+
+The baseline for a given (tenant, project, hour) only depends on earlier
+hours, so each process computes it once per hour with a single 24-key MGET
+and caches it.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any, Awaitable, Callable
 
-from clickhouse import ClickHouseWriter  # noqa: F401  (kept for future symmetry)
 from config import settings
 from kafka_client import make_consumer, publish_anomaly
 from pricing import calculate_cost
@@ -35,20 +57,170 @@ logger = logging.getLogger(__name__)
 
 GROUP_ID = "anomaly-detector"
 
-EMA_KEY      = "ema:{tenant}:{project}"
-HOUR_KEY     = "hourcost:{tenant}:{project}:{hour}"
-DEDUP_KEY    = "anomaly_fired:{tenant}:{project}"
+HOUR_KEY = "hourcost:{tenant}:{project}:{hour}"
+DEDUP_KEY = "anomaly_fired:{tenant}:{project}:{hour}"
+
+BASELINE_HOURS = 24
+HOUR_KEY_TTL_S = (BASELINE_HOURS + 2) * 3600   # current hour + 24 history + slack
+_MAX_FUTURE_SKEW_MS = 5 * 60 * 1000             # tolerate small client clock skew
+_MAX_CACHE_ENTRIES = 100_000
+
+
+# ---------------------------------------------------------------------------
+# Pure logic (unit-tested without Redis)
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class Baseline:
+    hourly_usd: float   # average spend of the active hours
+    active_hours: int   # hours with spend > 0 among the previous 24
+
+
+def baseline_from_history(hourly_costs: list[float]) -> Baseline:
+    active = [c for c in hourly_costs if c > 0]
+    if not active:
+        return Baseline(0.0, 0)
+    return Baseline(sum(active) / len(active), len(active))
+
+
+@dataclass(frozen=True)
+class SpikeRule:
+    multiplier: float = 3.0
+    min_baseline_hours: int = 3
+    min_cost_usd: float = 1.0
+
+    def is_spike(self, current_hour_usd: float, baseline: Baseline) -> bool:
+        if baseline.active_hours < self.min_baseline_hours or baseline.hourly_usd <= 0:
+            return False
+        if current_hour_usd < self.min_cost_usd:
+            return False
+        return current_hour_usd > self.multiplier * baseline.hourly_usd
+
+
+def event_hour(timestamp_ms: Any, now_ms: int) -> int:
+    """Hour bucket for an event: its own timestamp when plausible, otherwise
+    the current hour (missing, garbage, too old, or from the future)."""
+    try:
+        ts = int(timestamp_ms)
+    except (TypeError, ValueError):
+        ts = now_ms
+    if ts > now_ms + _MAX_FUTURE_SKEW_MS or ts < now_ms - BASELINE_HOURS * 3600 * 1000:
+        ts = now_ms
+    return ts // 3_600_000
+
+
+# ---------------------------------------------------------------------------
+# Detector
+# ---------------------------------------------------------------------------
+class CostSpikeDetector:
+    def __init__(
+        self,
+        redis: Any,
+        rule: SpikeRule,
+        *,
+        publish: Callable[[dict], Awaitable[None]],
+        dedup_ttl_s: int = 3600,
+        clock: Callable[[], float] = time.time,
+        cost_fn: Callable[[str, int, int], float] = calculate_cost,
+    ) -> None:
+        self._redis = redis
+        self._rule = rule
+        self._publish = publish
+        self._dedup_ttl_s = dedup_ttl_s
+        self._clock = clock
+        self._cost_fn = cost_fn
+        self._baselines: dict[tuple[str, str, int], Baseline] = {}
+
+    async def process(self, event: dict) -> dict | None:
+        """Account one event; publish and return the anomaly if it fires."""
+        tenant = event.get("tenant_id")
+        project = event.get("project_id")
+        if not (tenant and project):
+            return None
+
+        cost = self._cost_fn(
+            event.get("model") or "unknown",
+            int(event.get("prompt_tokens") or 0),
+            int(event.get("completion_tokens") or 0),
+        )
+        if cost <= 0:
+            return None
+
+        hour = event_hour(event.get("timestamp_ms"), int(self._clock() * 1000))
+        hour_key = HOUR_KEY.format(tenant=tenant, project=project, hour=hour)
+        pipe = self._redis.pipeline()
+        pipe.incrbyfloat(hour_key, cost)
+        pipe.expire(hour_key, HOUR_KEY_TTL_S)
+        current = float((await pipe.execute())[0])
+
+        # Cheap pre-check before touching the baseline: below the absolute
+        # floor nothing can fire, which is the common case for most events.
+        if current < self._rule.min_cost_usd:
+            return None
+
+        baseline = await self._baseline(tenant, project, hour)
+        if not self._rule.is_spike(current, baseline):
+            return None
+
+        dedup_key = DEDUP_KEY.format(tenant=tenant, project=project, hour=hour)
+        if not await self._redis.set(dedup_key, b"1", ex=self._dedup_ttl_s, nx=True):
+            return None
+
+        multiplier = current / baseline.hourly_usd
+        anomaly = {
+            "type": "cost_spike",
+            "tenant_id": tenant,
+            "project_id": project,
+            "severity": "critical" if multiplier > 10 else "warning",
+            "detected_at": datetime.now(tz=timezone.utc).isoformat(),
+            "details": {
+                "current_hour_cost_usd": round(current, 6),
+                "baseline_hourly_usd": round(baseline.hourly_usd, 6),
+                "baseline_hours": baseline.active_hours,
+                "multiplier": round(multiplier, 3),
+                "hour_start": datetime.fromtimestamp(hour * 3600, tz=timezone.utc).isoformat(),
+            },
+        }
+        await self._publish(anomaly)
+        logger.warning(
+            "cost_spike fired tenant=%s project=%s hour=$%.4f baseline=$%.4f/h over %dh x%.1f",
+            tenant, project, current, baseline.hourly_usd, baseline.active_hours, multiplier,
+        )
+        return anomaly
+
+    async def _baseline(self, tenant: str, project: str, hour: int) -> Baseline:
+        cache_key = (tenant, project, hour)
+        cached = self._baselines.get(cache_key)
+        if cached is not None:
+            return cached
+        keys = [
+            HOUR_KEY.format(tenant=tenant, project=project, hour=h)
+            for h in range(hour - BASELINE_HOURS, hour)
+        ]
+        raw = await self._redis.mget(keys)
+        baseline = baseline_from_history([float(v) if v is not None else 0.0 for v in raw])
+        if len(self._baselines) >= _MAX_CACHE_ENTRIES:
+            self._baselines.clear()  # entries for past hours are never needed again
+        self._baselines[cache_key] = baseline
+        return baseline
+
+
+def detector_from_settings(redis: Any) -> CostSpikeDetector:
+    return CostSpikeDetector(
+        redis,
+        SpikeRule(
+            multiplier=settings.cost_spike_multiplier,
+            min_baseline_hours=settings.cost_spike_min_baseline_hours,
+            min_cost_usd=settings.cost_spike_min_usd,
+        ),
+        publish=publish_anomaly,
+        dedup_ttl_s=settings.anomaly_dedup_ttl_s,
+    )
 
 
 async def run_anomaly_detector(stop: asyncio.Event) -> None:
     consumer = make_consumer(GROUP_ID)
     await consumer.start()
-    redis = get_redis()
-
-    # Per-process EMA cache so we don't re-fetch from Redis on every event.
-    # Cache is repopulated lazily from Redis (the source of truth).
-    ema_cache: dict[tuple[str, str], float] = {}
-
+    detector = detector_from_settings(get_redis())
     logger.info("anomaly-detector: started")
 
     try:
@@ -58,9 +230,9 @@ async def run_anomaly_detector(stop: asyncio.Event) -> None:
             except asyncio.TimeoutError:
                 batches = {}
 
-            for tp, msgs in batches.items():
+            for _tp, msgs in batches.items():
                 for msg in msgs:
-                    await _process(msg.value, redis, ema_cache)
+                    await detector.process(msg.value)
 
             if batches:
                 await consumer.commit()
@@ -68,77 +240,3 @@ async def run_anomaly_detector(stop: asyncio.Event) -> None:
     finally:
         await consumer.stop()
         logger.info("anomaly-detector: stopped")
-
-
-async def _load_ema(redis, tenant: str, project: str, cache: dict) -> float:
-    """Lazy hydrate from Redis. Source of truth is Redis; cache is just a hot copy."""
-    if (tenant, project) in cache:
-        return cache[(tenant, project)]
-    raw = await redis.get(EMA_KEY.format(tenant=tenant, project=project))
-    val = float(raw) if raw is not None else 0.0
-    cache[(tenant, project)] = val
-    return val
-
-
-async def _process(event: dict, redis, ema_cache: dict) -> None:
-    tenant = event.get("tenant_id")
-    project = event.get("project_id")
-    if not (tenant and project):
-        return
-
-    pt = int(event.get("prompt_tokens") or 0)
-    ct = int(event.get("completion_tokens") or 0)
-    model = event.get("model") or "unknown"
-    cost = calculate_cost(model, pt, ct)
-
-    # 1. Update the per-event EMA. alpha is intentionally small so single
-    #    expensive calls don't move the baseline much.
-    old_ema = await _load_ema(redis, tenant, project, ema_cache)
-    new_ema = settings.ema_alpha * cost + (1 - settings.ema_alpha) * old_ema
-    ema_cache[(tenant, project)] = new_ema
-
-    # 2. Bucket the cost into the current wall-clock hour.
-    hour_bucket = int(time.time() // 3600)
-    hour_key = HOUR_KEY.format(tenant=tenant, project=project, hour=hour_bucket)
-    ema_key = EMA_KEY.format(tenant=tenant, project=project)
-
-    # Pipeline: write back EMA, increment hour bucket, fetch updated value.
-    pipe = redis.pipeline()
-    pipe.set(ema_key, str(new_ema).encode())
-    # incrbyfloat is atomic; set TTL on first write so the bucket auto-expires
-    pipe.incrbyfloat(hour_key, cost)
-    pipe.expire(hour_key, 7200)  # keep two hours' worth so boundary races resolve
-    results = await pipe.execute()
-    current_hour_cost = float(results[1])
-
-    # 3. Decide if we should fire. Skip until baseline > 0 (no history yet).
-    # Without this guard, the very first event would trivially exceed 3 * 0.
-    threshold = settings.cost_spike_multiplier * new_ema
-    if new_ema <= 0 or current_hour_cost <= threshold:
-        return
-
-    # 4. Dedup. SETNX returns True iff we won the race.
-    dedup_key = DEDUP_KEY.format(tenant=tenant, project=project)
-    won = await redis.set(dedup_key, b"1", ex=settings.anomaly_dedup_ttl_s, nx=True)
-    if not won:
-        return
-
-    multiplier = current_hour_cost / new_ema if new_ema > 0 else 0.0
-    severity = "critical" if multiplier > 10 else "warning"
-
-    await publish_anomaly({
-        "type":        "cost_spike",
-        "tenant_id":   tenant,
-        "project_id":  project,
-        "severity":    severity,
-        "detected_at": datetime.now(tz=timezone.utc).isoformat(),
-        "details": {
-            "current_hour_cost_usd": round(current_hour_cost, 6),
-            "ema_baseline_usd":      round(new_ema, 6),
-            "multiplier":            round(multiplier, 3),
-        },
-    })
-    logger.warning(
-        "cost_spike fired tenant=%s project=%s hour=$%.4f baseline=$%.6f x%.1f",
-        tenant, project, current_hour_cost, new_ema, multiplier,
-    )

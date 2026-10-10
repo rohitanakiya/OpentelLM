@@ -1,115 +1,146 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { EventFlusher, type LLMEvent } from "../src/flush";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
+import { EventFlusher, ingestUrl, type LLMEvent } from "../src/flush";
 
-function makeEvent(i: number): LLMEvent {
+function ev(i: number): LLMEvent {
   return {
-    trace_id: `t-${i}`,
-    model: "gpt-4o",
-    provider: "openai",
-    prompt_tokens: 1,
-    completion_tokens: 1,
-    latency_ms: 10,
-    status: "success",
-    prompt_hash: "a".repeat(64),
-    response_hash: "b".repeat(64),
+    trace_id: `t-${i}`, model: "gpt-4o", provider: "openai", prompt_tokens: 1, completion_tokens: 1,
+    latency_ms: 10, status: "success", prompt_hash: "a".repeat(64), response_hash: "b".repeat(64),
     sdk_version: "test",
   };
 }
 
+/** A real HTTP server standing in for ingest-api. */
+class IngestStub {
+  status = 202;
+  requests: Array<{ path: string; auth: string | undefined; events: LLMEvent[] }> = [];
+  private server = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (d) => { body += d; });
+    req.on("end", () => {
+      this.requests.push({ path: req.url ?? "", auth: req.headers.authorization, events: JSON.parse(body).events });
+      res.writeHead(this.status);
+      res.end("{}");
+    });
+  });
+  url = "";
+  async start() {
+    await new Promise<void>((r) => this.server.listen(0, "127.0.0.1", r));
+    this.url = `http://127.0.0.1:${(this.server.address() as AddressInfo).port}`;
+  }
+  stop() {
+    return new Promise<void>((r) => this.server.close(() => r()));
+  }
+  events() {
+    return this.requests.flatMap((r) => r.events);
+  }
+}
+
+let ingest: IngestStub;
+const errors: Error[] = [];
+const make = (extra: Partial<ConstructorParameters<typeof EventFlusher>[0]> = {}) =>
+  new EventFlusher({ endpoint: ingest.url, apiKey: "opentelm_live_abc", flushIntervalMs: 60_000,
+                     onError: (e) => errors.push(e), ...extra });
+
+beforeEach(async () => {
+  ingest = new IngestStub();
+  await ingest.start();
+  errors.length = 0;
+});
+afterEach(async () => {
+  await ingest.stop();
+});
+
 describe("EventFlusher", () => {
-  let flusher: EventFlusher;
-  let originalRequestStub: ReturnType<typeof vi.fn>;
-
-  beforeEach(() => {
-    flusher = new EventFlusher({
-      endpoint: "http://localhost:1/v1/ingest",
-      apiKey:   "opentelm_live_test",
-      flushIntervalMs: 60_000, // long — we trigger flush() manually
-    });
+  it("POSTs batches to /v1/ingest with the bearer key", async () => {
+    const f = make();
+    for (let i = 0; i < 3; i++) f.enqueue(ev(i));
+    await f.flush();
+    expect(ingest.requests[0].path).toBe("/v1/ingest");
+    expect(ingest.requests[0].auth).toBe("Bearer opentelm_live_abc");
+    expect(ingest.events().map((e) => e.trace_id)).toEqual(["t-0", "t-1", "t-2"]);
+    expect(f.sent).toBe(3);
   });
 
-  afterEach(async () => {
-    await flusher.shutdown();
+  it("splits into batches", async () => {
+    const f = make({ batchSize: 2 });
+    for (let i = 0; i < 5; i++) f.enqueue(ev(i));
+    await f.flush();
+    expect(ingest.requests.map((r) => r.events.length)).toEqual([2, 2, 1]);
   });
 
-  it("drops the OLDEST event when queue exceeds maxQueueSize", () => {
-    const f = new EventFlusher({
-      endpoint: "http://localhost:1/v1/ingest",
-      apiKey: "opentelm_live_test",
-      maxQueueSize: 3,
-      flushIntervalMs: 60_000,
-    });
-    f.enqueue(makeEvent(1));
-    f.enqueue(makeEvent(2));
-    f.enqueue(makeEvent(3));
-    f.enqueue(makeEvent(4));    // pushes out 1
-    f.enqueue(makeEvent(5));    // pushes out 2
-    expect(f.size()).toBe(3);
-
-    // Force a flush by stubbing the network call to capture the batch.
-    const sent: LLMEvent[][] = [];
-    // @ts-expect-error reach in for the test
-    f.send = async (events: LLMEvent[]) => { sent.push(events); };
-    return f.flush().then(() => {
-      expect(sent[0].map((e) => e.trace_id)).toEqual(["t-3", "t-4", "t-5"]);
-      return f.shutdown();
-    });
+  it("sends a full batch without waiting for the timer", async () => {
+    const f = make({ batchSize: 5 });
+    for (let i = 0; i < 5; i++) f.enqueue(ev(i));
+    for (let t = 0; t < 100 && ingest.events().length < 5; t++) await new Promise((r) => setTimeout(r, 20));
+    expect(ingest.events()).toHaveLength(5);
   });
 
-  it("flush() clears the queue when the network call succeeds", async () => {
-    flusher.enqueue(makeEvent(1));
-    flusher.enqueue(makeEvent(2));
-    expect(flusher.size()).toBe(2);
-
-    // @ts-expect-error stub network
-    flusher.send = async () => {};
-    await flusher.flush();
-    expect(flusher.size()).toBe(0);
+  it("drops the oldest events when the queue is full", async () => {
+    const f = make({ maxQueueSize: 3 });
+    for (let i = 0; i < 5; i++) f.enqueue(ev(i));
+    expect(f.dropped).toBe(2);
+    await f.flush();
+    expect(ingest.events().map((e) => e.trace_id)).toEqual(["t-2", "t-3", "t-4"]);
   });
 
-  it("flush() requeues events when the network call fails", async () => {
-    flusher.enqueue(makeEvent(1));
-    flusher.enqueue(makeEvent(2));
-
-    // @ts-expect-error stub network to reject
-    flusher.send = async () => { throw new Error("boom"); };
-    await flusher.flush();
-    expect(flusher.size()).toBe(2);
+  it("does not retry 4xx responses", async () => {
+    ingest.status = 401;
+    const f = make();
+    f.enqueue(ev(1));
+    await f.flush();
+    await f.flush();
+    expect(ingest.requests).toHaveLength(1);
+    expect(f.failed).toBe(1);
+    expect(f.size()).toBe(0);
+    expect(errors[0].message).toMatch(/401/);
   });
 
-  it("the periodic timer is unref()'d so it doesn't keep the process open", () => {
-    const f = new EventFlusher({
-      endpoint: "http://localhost:1/v1/ingest",
-      apiKey: "opentelm_live_test",
-      flushIntervalMs: 50,
-    });
-    // Spy on setInterval so we can grab the returned Timer and assert unref was called.
-    const realSetInterval = global.setInterval;
-    const fakeTimer = { unref: vi.fn(), [Symbol.toPrimitive]: () => 1 } as unknown as NodeJS.Timeout;
-    const intervalSpy = vi.fn(() => fakeTimer);
-    // @ts-expect-error replacing setInterval for the duration of this test
-    global.setInterval = intervalSpy;
+  it("keeps events for a later retry on 5xx", async () => {
+    ingest.status = 503;
+    const f = make();
+    f.enqueue(ev(1));
+    await f.flush();
+    expect(f.size()).toBe(1);
+    ingest.status = 202;
+    await f.flush();
+    expect(f.size()).toBe(0);
+    expect(f.sent).toBe(1);
+  });
 
+  it("never throws when the ingest API is unreachable", async () => {
+    const f = new EventFlusher({ endpoint: "http://127.0.0.1:9", apiKey: "k", onError: (e) => errors.push(e) });
+    f.enqueue(ev(1));
+    await expect(f.flush()).resolves.toBeUndefined();
+    expect(errors[0].message).toMatch(/could not reach/);
+  });
+
+  it("shutdown() flushes and later enqueues are ignored", async () => {
+    const f = make();
     f.start();
-    expect(intervalSpy).toHaveBeenCalledOnce();
-    expect(fakeTimer.unref).toHaveBeenCalledOnce();
-
-    global.setInterval = realSetInterval;
-    return f.shutdown();
+    f.enqueue(ev(1));
+    await f.shutdown();
+    expect(ingest.events()).toHaveLength(1);
+    f.enqueue(ev(2));
+    expect(f.size()).toBe(0);
   });
 
-  it("shutdown() flushes one last time", async () => {
-    flusher.enqueue(makeEvent(1));
-    let flushed = 0;
-    // @ts-expect-error stub
-    flusher.send = async (events: LLMEvent[]) => { flushed += events.length; };
-    await flusher.shutdown();
-    expect(flushed).toBe(1);
+  it("does not install SIGINT / SIGTERM handlers", () => {
+    // Regression: listening for these replaced Node's default exit
+    // behaviour (first Ctrl+C ignored, Kubernetes waiting out the grace period).
+    const before = [process.listenerCount("SIGINT"), process.listenerCount("SIGTERM")];
+    const f = make();
+    f.start();
+    expect([process.listenerCount("SIGINT"), process.listenerCount("SIGTERM")]).toEqual(before);
+    void f.shutdown();
   });
 
-  it("rejects further enqueues after shutdown", async () => {
-    await flusher.shutdown();
-    flusher.enqueue(makeEvent(1));
-    expect(flusher.size()).toBe(0);
+  it.each([
+    ["http://x:8000", "http://x:8000/v1/ingest"],
+    ["http://x:8000/", "http://x:8000/v1/ingest"],
+    ["http://x:8000/v1/ingest", "http://x:8000/v1/ingest"],
+  ])("normalises %s", (input, expected) => {
+    expect(ingestUrl(input)).toBe(expected);
   });
 });

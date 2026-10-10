@@ -1,17 +1,25 @@
-// Async event queue with periodic batched flush.
+// Background event queue with batched delivery to the ingest API.
 //
-// Design rules (mirror Python SDK):
-//   - flush MUST NOT block the caller. Every push is sync, network I/O
-//     happens on a setInterval timer.
-//   - the timer is unref()'d so it never holds the Node event loop open
-//     and prevent a normal process exit.
-//   - on overflow (>1000 events queued) we DROP the oldest, never the
-//     newest, never the caller's call.
-//   - on SIGTERM/SIGINT/beforeExit we attempt one final flush.
+// Design rules (same as the Python SDK):
+//   - enqueue() is synchronous and never throws, never does I/O.
+//   - The queue is bounded; when full the OLDEST event is dropped.
+//   - Delivery runs on an unref()'d timer, so it never keeps a finished
+//     process alive.
+//   - On `beforeExit` (the event loop is about to empty) one last flush is
+//     attempted.
+//
+// What this deliberately does NOT do: listen for SIGINT / SIGTERM. Adding a
+// listener for those signals replaces Node's default "exit now" behaviour,
+// so the previous version made apps ignore the first Ctrl+C and made
+// Kubernetes wait out the whole termination grace period. If you handle
+// signals yourself, call `await opentelm.shutdown()` in your handler.
+//
+// HTTP goes through node:http(s) rather than global fetch: frameworks such
+// as Next.js patch fetch (caching, instrumentation), and telemetry must not
+// be affected by that.
 
-import { request as httpsRequest } from "node:https";
 import { request as httpRequest } from "node:http";
-import { URL } from "node:url";
+import { request as httpsRequest } from "node:https";
 
 export interface LLMEvent {
   trace_id: string;
@@ -32,125 +40,170 @@ export interface LLMEvent {
   timestamp_ms?: number;
 }
 
+/** Sends one JSON body, resolves with the HTTP status, rejects on network error. */
+export type Sender = (body: string) => Promise<number>;
+
 export interface FlushConfig {
-  endpoint: string;        // e.g. "https://opentelm.example.com/v1/ingest"
-  apiKey: string;          // raw opentelm_live_... key
+  endpoint: string;
+  apiKey: string;
   flushIntervalMs?: number;
   maxQueueSize?: number;
+  batchSize?: number;
+  timeoutMs?: number;
   onError?: (err: Error) => void;
+  /** Replace the HTTP transport (tests). */
+  sender?: Sender;
 }
 
-const DEFAULT_INTERVAL = 2_000;
-const DEFAULT_MAX = 1_000;
+const DEFAULT_INTERVAL_MS = 2_000;
+const DEFAULT_MAX_QUEUE = 1_000;
+const DEFAULT_BATCH = 100; // ingest-api accepts up to 500
+const DEFAULT_TIMEOUT_MS = 5_000;
+const WARN_EVERY_MS = 60_000;
+
+export function ingestUrl(endpoint: string): string {
+  const e = endpoint.replace(/\/+$/, "");
+  return e.endsWith("/v1/ingest") ? e : `${e}/v1/ingest`;
+}
 
 export class EventFlusher {
   private queue: LLMEvent[] = [];
   private timer: NodeJS.Timeout | null = null;
-  private inflight = false;
+  private inflight: Promise<void> | null = null;
   private stopped = false;
+  private readonly url: string;
+  private readonly interval: number;
+  private readonly maxQueue: number;
+  private readonly batchSize: number;
+  private readonly timeoutMs: number;
+  private readonly send: Sender;
+  private readonly onError: (err: Error) => void;
+  private readonly onBeforeExit = () => { void this.shutdown(); };
+  private lastWarn = new Map<string, number>();
 
-  constructor(private cfg: Required<Pick<FlushConfig, "endpoint" | "apiKey">> &
-                          FlushConfig) {
-    this.cfg.flushIntervalMs ??= DEFAULT_INTERVAL;
-    this.cfg.maxQueueSize    ??= DEFAULT_MAX;
+  dropped = 0; // dropped because the queue was full
+  failed = 0;  // rejected by the ingest API (4xx other than 429)
+  sent = 0;    // accepted by the ingest API
+
+  constructor(private readonly cfg: FlushConfig) {
+    this.url = ingestUrl(cfg.endpoint);
+    this.interval = cfg.flushIntervalMs ?? DEFAULT_INTERVAL_MS;
+    this.maxQueue = Math.max(1, cfg.maxQueueSize ?? DEFAULT_MAX_QUEUE);
+    this.batchSize = Math.min(500, Math.max(1, cfg.batchSize ?? DEFAULT_BATCH));
+    this.timeoutMs = cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.send = cfg.sender ?? ((body) => this.httpSend(body));
+    this.onError = cfg.onError ?? ((err) => this.warn(err.message, err.message));
   }
 
   start(): void {
-    if (this.timer) return;
-    this.timer = setInterval(() => {
-      void this.flush().catch((err) => this.cfg.onError?.(err as Error));
-    }, this.cfg.flushIntervalMs);
-
-    // CRITICAL: unref so the process can exit even if our queue is empty.
-    // Without this a tiny CLI app would hang for 2s after main() returns.
+    if (this.timer || this.stopped) return;
+    this.timer = setInterval(() => { void this.flush(); }, this.interval);
     this.timer.unref();
-
-    // Drain on shutdown signals — best-effort, sync-style fire-and-forget.
-    const shutdown = () => { void this.shutdown(); };
-    process.once("SIGTERM",     shutdown);
-    process.once("SIGINT",      shutdown);
-    process.once("beforeExit",  shutdown);
+    process.once("beforeExit", this.onBeforeExit);
   }
 
   enqueue(event: LLMEvent): void {
     if (this.stopped) return;
-    if (this.queue.length >= this.cfg.maxQueueSize!) {
-      // Drop the oldest. We could LIFO instead but FIFO matches Python.
+    if (this.queue.length >= this.maxQueue) {
       this.queue.shift();
+      this.dropped++;
     }
     this.queue.push(event);
-  }
-
-  size(): number { return this.queue.length; }
-
-  /** Public for tests; the timer calls this. */
-  async flush(): Promise<void> {
-    if (this.inflight || this.queue.length === 0) return;
-    const batch = this.queue.splice(0, this.queue.length);
-    this.inflight = true;
-    try {
-      await this.send(batch);
-    } catch (err) {
-      // On send failure, push the batch back in to retry on next tick.
-      // Cap the requeue to avoid unbounded growth: only requeue if the
-      // queue still has headroom, otherwise drop.
-      const headroom = this.cfg.maxQueueSize! - this.queue.length;
-      if (headroom > 0) {
-        this.queue.unshift(...batch.slice(0, headroom));
-      }
-      this.cfg.onError?.(err as Error);
-    } finally {
-      this.inflight = false;
+    if (this.queue.length === this.batchSize) {
+      // A full batch is ready: send it now rather than waiting for the timer.
+      setTimeout(() => { void this.flush(); }, 0).unref();
     }
   }
 
+  size(): number {
+    return this.queue.length;
+  }
+
+  /** Send everything queued so far. Never rejects. */
+  async flush(): Promise<void> {
+    while (this.inflight) await this.inflight;
+    if (this.queue.length === 0) return;
+    this.inflight = this.drain().finally(() => { this.inflight = null; });
+    await this.inflight;
+  }
+
+  /** Stop the timer and flush what is left. Idempotent. */
   async shutdown(): Promise<void> {
-    if (this.stopped) return;
+    if (this.stopped) {
+      while (this.inflight) await this.inflight;
+      return;
+    }
     this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
-    // One last flush attempt
-    try { await this.flush(); } catch { /* swallow on shutdown */ }
+    process.removeListener("beforeExit", this.onBeforeExit);
+    await this.flush();
   }
 
-  // ---------------------------------------------------------------
-  // HTTP — minimal, no axios/node-fetch dep so the SDK stays tiny.
-  // ---------------------------------------------------------------
-  private send(events: LLMEvent[]): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const url = new URL(this.cfg.endpoint);
-      const lib = url.protocol === "https:" ? httpsRequest : httpRequest;
+  private async drain(): Promise<void> {
+    while (this.queue.length > 0) {
+      const batch = this.queue.splice(0, this.batchSize);
+      let status: number;
+      try {
+        status = await this.send(JSON.stringify({ events: batch }));
+      } catch (err) {
+        this.requeue(batch);
+        this.onError(new Error(`opentelm: could not reach ingest API at ${this.url}: ${(err as Error).message}`));
+        return; // try again on the next tick
+      }
+      if (status >= 200 && status < 300) {
+        this.sent += batch.length;
+      } else if (status === 429 || status >= 500) {
+        this.requeue(batch);
+        this.onError(new Error(`opentelm: ingest API returned HTTP ${status}; will retry`));
+        return;
+      } else {
+        // Bad API key or invalid payload: retrying cannot help.
+        this.failed += batch.length;
+        this.onError(new Error(`opentelm: ingest API rejected ${batch.length} events with HTTP ${status}`));
+      }
+    }
+  }
 
-      const body = Buffer.from(JSON.stringify({ events }));
-      const req = lib(
+  private requeue(batch: LLMEvent[]): void {
+    const room = this.maxQueue - this.queue.length;
+    const keep = room > 0 ? batch.slice(-room) : [];
+    this.dropped += batch.length - keep.length;
+    this.queue.unshift(...keep);
+  }
+
+  private warn(key: string, message: string): void {
+    const now = Date.now();
+    if (now - (this.lastWarn.get(key) ?? -Infinity) >= WARN_EVERY_MS) {
+      this.lastWarn.set(key, now);
+      console.warn(message);
+    }
+  }
+
+  private httpSend(body: string): Promise<number> {
+    return new Promise((resolve, reject) => {
+      const url = new URL(this.url);
+      const send = url.protocol === "https:" ? httpsRequest : httpRequest;
+      const payload = Buffer.from(body);
+      const req = send(
+        url,
         {
-          hostname: url.hostname,
-          port: url.port || (url.protocol === "https:" ? 443 : 80),
-          path: url.pathname + url.search,
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "Content-Length": body.byteLength,
+            "Content-Length": payload.byteLength,
             Authorization: `Bearer ${this.cfg.apiKey}`,
           },
-          // Bound the request — telemetry should never sit on a stuck socket.
-          timeout: 5_000,
+          timeout: this.timeoutMs,
         },
         (res) => {
-          // Drain the response so the socket can be reused
-          res.resume();
-          if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-            resolve();
-          } else {
-            reject(new Error(`ingest returned ${res.statusCode}`));
-          }
+          res.resume(); // drain so the socket can be reused
+          resolve(res.statusCode ?? 0);
         },
       );
-
       req.on("error", reject);
-      req.on("timeout", () => req.destroy(new Error("ingest request timed out")));
-      req.write(body);
-      req.end();
+      req.on("timeout", () => req.destroy(new Error("request timed out")));
+      req.end(payload);
     });
   }
 }

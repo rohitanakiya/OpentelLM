@@ -1,32 +1,24 @@
 {
   "name": "opentelm-node",
-  "version": "0.1.0",
-  "description": "Zero-config observability SDK for LLM apps. Auto-instruments OpenAI and Anthropic calls.",
-  "keywords": [
-    "llm",
-    "observability",
-    "openai",
-    "anthropic",
-    "opentelemetry",
-    "monitoring"
-  ],
-  "homepage": "https://github.com/yourorg/opentelm",
+  "version": "0.2.0",
+  "description": "Zero-config observability SDK for LLM apps. Auto-instruments OpenAI and Anthropic calls: ESM and CommonJS, sync and streaming.",
+  "homepage": "https://github.com/rohitanakiya/OpentelLM/tree/main/sdk/nodejs",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/yourorg/opentelm.git",
+    "url": "git+https://github.com/rohitanakiya/OpentelLM.git",
     "directory": "sdk/nodejs"
   },
   "bugs": {
-    "url": "https://github.com/yourorg/opentelm/issues"
+    "url": "https://github.com/rohitanakiya/OpentelLM/issues"
   },
   "license": "MIT",
-  "main":   "./dist/index.js",
+  "main": "./dist/index.js",
   "module": "./dist/index.mjs",
-  "types":  "./dist/index.d.ts",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types":   "./dist/index.d.ts",
-      "import":  "./dist/index.mjs",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
       "require": "./dist/index.js"
     }
   },
@@ -39,24 +31,39 @@
     "node": ">=18"
   },
   "scripts": {
-    "build":      "tsup src/index.ts --format cjs,esm --dts --clean",
-    "test":       "vitest run",
+    "build": "tsup",
+    "test": "vitest run",
     "test:watch": "vitest",
-    "lint":       "tsc --noEmit",
-    "prepublishOnly": "npm run lint && npm run test && npm run build"
+    "lint": "tsc --noEmit",
+    "prepublishOnly": "npm run lint && npm run build && npm test",
+    "bench": "npm run build && node bench/overhead.mjs"
   },
   "peerDependencies": {
-    "openai": ">=4.0.0",
-    "@anthropic-ai/sdk": ">=0.20.0"
+    "@anthropic-ai/sdk": ">=0.20.0",
+    "openai": ">=4.20.0"
   },
   "peerDependenciesMeta": {
-    "openai": { "optional": true },
-    "@anthropic-ai/sdk": { "optional": true }
+    "openai": {
+      "optional": true
+    },
+    "@anthropic-ai/sdk": {
+      "optional": true
+    }
   },
   "devDependencies": {
+    "@anthropic-ai/sdk": "^0.133.0",
     "@types/node": "^20.12.12",
+    "openai": "^7.32.0",
     "tsup": "^8.0.2",
     "typescript": "^5.4.5",
     "vitest": "^1.6.0"
-  }
+  },
+  "keywords": [
+    "llm",
+    "observability",
+    "openai",
+    "anthropic",
+    "monitoring",
+    "tracing"
+  ]
 }

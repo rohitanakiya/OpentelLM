@@ -1,69 +1,28 @@
-import { describe, it, expect } from "vitest";
-import { scrubPii, detectPii } from "../src/pii";
+import { describe, expect, it } from "vitest";
+import { detectPii, scrubPii } from "../src/pii";
 
-describe("pii.scrubPii", () => {
-  it("scrubs email addresses", () => {
-    const out = scrubPii("contact me at jane.doe+filter@example.co.uk for help");
-    expect(out).toBe("contact me at [EMAIL] for help");
+// Most cases live in test/parity.test.ts (shared with the Python SDK).
+describe("scrubPii", () => {
+  it("keeps the country code out of international numbers", () => {
+    // Regression: the Indian pattern ran first and left "+44 [PHONE]".
+    expect(scrubPii("call +44 7911123456")).toBe("call [PHONE]");
   });
 
-  it("scrubs Indian phone numbers with +91 prefix", () => {
-    const out = scrubPii("call +91 9876543210 today");
-    expect(out).toBe("call [PHONE] today");
+  it("labels Anthropic keys as Anthropic keys", () => {
+    // Regression: the OpenAI pattern ran first and matched sk-ant-... too.
+    expect(scrubPii("sk-ant-api03-abcdefghijklmnopqrstuv")).toBe("[ANTHROPIC_KEY]");
   });
 
-  it("scrubs Indian phone numbers without prefix", () => {
-    const out = scrubPii("9876543210");
-    expect(out).toBe("[PHONE]");
+  it("is stable, so identical prompts still group together", () => {
+    expect(scrubPii("hi a@b.co")).toBe(scrubPii("hi x@y.io"));
   });
 
-  it("scrubs international phone numbers", () => {
-    const out = scrubPii("US line: +1-415-555-0000");
-    expect(out).toContain("[PHONE]");
-    expect(out).not.toContain("415-555-0000");
+  it("leaves ordinary numbers alone", () => {
+    expect(scrubPii("order 12345 shipped 2026-10-11")).toBe("order 12345 shipped 2026-10-11");
   });
 
-  it("scrubs OpenTelLM API keys", () => {
-    const out = scrubPii("Bearer opentelm_live_abcdef0123456789abcdef0123456789");
-    expect(out).toBe("Bearer [OPENTELM_KEY]");
-  });
-
-  it("scrubs OpenAI keys", () => {
-    const out = scrubPii("export OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz0123");
-    expect(out).toContain("[OPENAI_KEY]");
-    expect(out).not.toMatch(/sk-proj-/);
-  });
-
-  it("leaves benign text alone", () => {
-    const text = "What is the capital of France?";
-    expect(scrubPii(text)).toBe(text);
-  });
-
-  it("handles empty input", () => {
-    expect(scrubPii("")).toBe("");
-  });
-
-  it("hash-stable for the same PII (so prompt_hash dedup still works)", () => {
-    const a = scrubPii("hi alice@x.com");
-    const b = scrubPii("hi alice@x.com");
-    expect(a).toBe(b);
-  });
-
-  it("scrubs multiple distinct PII types in one string", () => {
-    const out = scrubPii(
-      "alice@x.com used opentelm_live_abcdefghijklmnopqrstuvwxyz12 from +91 9876543210",
-    );
-    expect(out).toContain("[EMAIL]");
-    expect(out).toContain("[OPENTELM_KEY]");
-    expect(out).toContain("[PHONE]");
-  });
-});
-
-describe("pii.detectPii", () => {
-  it("returns matched category names", () => {
-    expect(detectPii("alice@x.com")).toEqual(["email"]);
-  });
-  it("returns empty for clean text", () => {
-    expect(detectPii("hello world")).toEqual([]);
+  it("detectPii reports categories", () => {
+    expect(detectPii("a@b.co 9876543210")).toEqual(["email", "phone_in"]);
+    expect(detectPii("nothing here")).toEqual([]);
   });
 });

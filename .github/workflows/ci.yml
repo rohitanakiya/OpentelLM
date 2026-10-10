@@ -182,6 +182,45 @@ jobs:
         run: python -m pytest -v
 
   # -------------------------------------------------------------------
+  # Node SDK — real openai / @anthropic-ai/sdk packages with a fake fetch,
+  # plus smoke tests of the BUILT package loaded as a CommonJS app and as
+  # an ES module app. openai 7.x needs Node >= 22, so the oldest supported
+  # SDK releases are tested on the older Node versions.
+  # -------------------------------------------------------------------
+  test-node-sdk:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { node: "22", sdks: "latest" }
+          - { node: "24", sdks: "latest" }
+          - { node: "20", sdks: "oldest" }
+          - { node: "18", sdks: "oldest" }
+    defaults:
+      run:
+        working-directory: sdk/nodejs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: sdk/nodejs/package-lock.json
+      - name: Install
+        run: |
+          npm ci
+          if [ "${{ matrix.sdks }}" = "oldest" ]; then
+            npm install --no-save openai@4.20.0 @anthropic-ai/sdk@0.20.0
+          fi
+      - name: Type-check
+        run: npm run lint
+      - name: Build
+        run: npm run build
+      - name: Test
+        run: npm test
+
+  # -------------------------------------------------------------------
   # Dashboard build + typecheck
   # -------------------------------------------------------------------
   test-dashboard:

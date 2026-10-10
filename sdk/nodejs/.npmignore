@@ -5,6 +5,8 @@ test/
 tsconfig.json
 .eslintrc*
 vitest.config*
+tsup.config*
+bench/
 .github/
 *.tsbuildinfo
 node_modules/

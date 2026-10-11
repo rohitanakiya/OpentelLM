@@ -17,7 +17,9 @@ const built = existsSync(path.join(root, "dist/index.js")) && existsSync(path.jo
 
 let appDir = "";
 let sinkUrl = "";
-let received: unknown[] = [];
+// Events per run, keyed by the path prefix each run puts on its endpoint,
+// so a slow run can never leak events into the next one.
+const received = new Map<string, unknown[]>();
 let server: http.Server;
 
 beforeAll(async () => {
@@ -25,15 +27,23 @@ beforeAll(async () => {
   // A throwaway "app" whose node_modules link to this package and its peers.
   appDir = mkdtempSync(path.join(tmpdir(), "opentelm-app-"));
   mkdirSync(path.join(appDir, "node_modules/@anthropic-ai"), { recursive: true });
-  symlinkSync(root, path.join(appDir, "node_modules/opentelm-node"), "dir");
-  symlinkSync(path.join(root, "node_modules/openai"), path.join(appDir, "node_modules/openai"), "dir");
-  symlinkSync(path.join(root, "node_modules/@anthropic-ai/sdk"), path.join(appDir, "node_modules/@anthropic-ai/sdk"), "dir");
+  // "junction" on Windows: real symlinks there need admin rights or
+  // Developer Mode (EPERM otherwise); junctions don't. Ignored elsewhere.
+  const link = (target: string, at: string) =>
+    symlinkSync(target, path.join(appDir, at), process.platform === "win32" ? "junction" : "dir");
+  link(root, "node_modules/opentelm-node");
+  link(path.join(root, "node_modules/openai"), "node_modules/openai");
+  link(path.join(root, "node_modules/@anthropic-ai/sdk"), "node_modules/@anthropic-ai/sdk");
   cpSync(path.join(root, "test/fixtures"), appDir, { recursive: true });
 
   server = http.createServer((req, res) => {
     let body = "";
     req.on("data", (d) => { body += d; });
-    req.on("end", () => { received.push(...JSON.parse(body).events); res.writeHead(202); res.end("{}"); });
+    req.on("end", () => {
+      const run = (req.url ?? "").replace(/\/v1\/ingest$/, "");
+      received.set(run, [...(received.get(run) ?? []), ...JSON.parse(body).events]);
+      res.writeHead(202); res.end("{}");
+    });
   });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   sinkUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -41,11 +51,15 @@ beforeAll(async () => {
 
 afterAll(() => new Promise<void>((r) => (server ? server.close(() => r()) : r())));
 
-function run(file: string): Promise<{ code: number | null; stderr: string }> {
+// Starting a fresh Node process that loads openai + @anthropic-ai/sdk can
+// take well over 10 s on Windows (Defender scanning, OneDrive folders).
+const SPAWN_TIMEOUT_MS = 60_000;
+
+function run(file: string, sink: string): Promise<{ code: number | null; stderr: string }> {
   return new Promise((resolve) => {
     // --no-deprecation: older openai releases trigger Node's punycode warning.
     const child = spawn(process.execPath, ["--no-deprecation", file],
-                        { cwd: appDir, env: { ...process.env, SINK_URL: sinkUrl } });
+                        { cwd: appDir, env: { ...process.env, SINK_URL: sink } });
     let stderr = "";
     child.stderr.on("data", (d) => { stderr += d; });
     child.on("exit", (code) => resolve({ code, stderr }));
@@ -54,13 +68,13 @@ function run(file: string): Promise<{ code: number | null; stderr: string }> {
 
 describe.runIf(built)("built package", () => {
   it.each(["app.cjs", "app.mjs"])("%s: all calls are traced and flushed on exit", async (file) => {
-    received = [];
-    const { code, stderr } = await run(file);
+    const runId = `/${file.replace(".", "-")}-${Date.now()}`;
+    const { code, stderr } = await run(file, sinkUrl + runId);
     expect(stderr).toBe("");
     expect(code).toBe(0);
-    const providers = (received as Array<{ provider: string }>).map((e) => e.provider).sort();
-    expect(providers).toEqual(["anthropic", "openai", "openai"]);
-  });
+    const events = (received.get(runId) ?? []) as Array<{ provider: string }>;
+    expect(events.map((e) => e.provider).sort()).toEqual(["anthropic", "openai", "openai"]);
+  }, SPAWN_TIMEOUT_MS);
 
   it("the app still exits on the first SIGINT", async () => {
     const child = spawn(process.execPath, ["idle.mjs"], { cwd: appDir });
@@ -70,5 +84,5 @@ describe.runIf(built)("built package", () => {
     const signal = await new Promise((r) => child.on("exit", (_code, sig) => r(sig)));
     expect(signal).toBe("SIGINT");
     expect(Date.now() - t0).toBeLessThan(2_000);
-  });
+  }, SPAWN_TIMEOUT_MS);
 });

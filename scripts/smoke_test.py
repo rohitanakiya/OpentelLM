@@ -226,8 +226,15 @@ def main() -> int:
 
     s = wait_until("overview stats", stats_ready, 150, every_s=5)
     if s:
-        ok(f"overview: {s['requests_today']} requests, ${s['cost_today']:.4f}, "
-           f"error rate {s['error_rate']:.3f}")
+        # Exactly `total`: minutes split into late-correction rows must
+        # add up, never double count.
+        (ok if s["requests_today"] == total else fail)(
+            f"overview: {s['requests_today']} requests (expected {total}), ${s['cost_today']:.4f}, "
+            f"error rate {s['error_rate']:.3f}")
+        # Latencies were drawn from N(400 ms, 40 ms), so the true p99 is
+        # ~493 ms. This checks the t-digest centroids merged in ClickHouse.
+        p99 = s.get("p99_latency", 0)
+        (ok if 430 <= p99 <= 560 else fail)(f"overview p99 latency = {p99:.0f} ms (expected ~493)")
     else:
         fail("overview stats never counted the events. Check `docker compose logs stream-processor`.")
 

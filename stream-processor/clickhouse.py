@@ -23,9 +23,17 @@ INSERT INTO opentelm.llm_metrics_1m (
     tenant_id, project_id, model, window_start,
     request_count, error_count,
     prompt_tokens, completion_tokens, cost_usd,
-    p50_latency_ms, p95_latency_ms, p99_latency_ms
+    p50_latency_ms, p95_latency_ms, p99_latency_ms,
+    latency_means, latency_weights
 ) VALUES
 """
+
+# Columns added after the first release. infra/clickhouse/schema.sql only runs
+# on a brand-new ClickHouse volume, so existing installs get them here.
+_METRICS_MIGRATIONS = (
+    "ALTER TABLE opentelm.llm_metrics_1m ADD COLUMN IF NOT EXISTS latency_means Array(Float32)",
+    "ALTER TABLE opentelm.llm_metrics_1m ADD COLUMN IF NOT EXISTS latency_weights Array(UInt32)",
+)
 
 
 _ANOMALY_INSERT_SQL = """
@@ -46,6 +54,13 @@ class ClickHouseWriter:
             secure=settings.clickhouse_secure,
         )
         self._loop = asyncio.get_event_loop()
+
+    async def ensure_metrics_schema(self) -> None:
+        await self._loop.run_in_executor(None, self._sync_ensure_metrics_schema)
+
+    def _sync_ensure_metrics_schema(self) -> None:
+        for sql in _METRICS_MIGRATIONS:
+            self._client.execute(sql)
 
     async def write_metrics(self, rows: list[dict]) -> None:
         if not rows:

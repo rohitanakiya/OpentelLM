@@ -101,7 +101,7 @@ async def test_stats_returns_expected_shape(dashboard_client):
     r = await dashboard_client.get("/api/overview/stats")
     assert r.status_code == 200, r.text
     data = r.json()
-    for key in ("requests_today", "cost_today", "avg_p99_latency", "error_rate"):
+    for key in ("requests_today", "cost_today", "p99_latency", "error_rate"):
         assert key in data, f"missing key: {key}"
         assert isinstance(data[key], (int, float)), f"{key} should be numeric"
 

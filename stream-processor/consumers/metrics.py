@@ -1,24 +1,42 @@
 """
-metrics-aggregator: tumbling 60s windows of (tenant_id, project_id, model).
+metrics-aggregator: tumbling 60 s windows per (tenant_id, project_id, model).
 
-For each window we maintain:
-  - request_count, error_count
-  - prompt_tokens, completion_tokens
-  - cost_usd (computed from token counts via pricing table)
-  - a TDigest of latencies → p50/p95/p99 at flush time
+Each window keeps counts, tokens, cost and a t-digest of latencies
+(tdigest.py), so memory per window is bounded however much traffic it gets.
 
-A T-Digest is used instead of a list-of-latencies because lists grow
-unbounded with traffic. T-Digest is O(1) memory per window with bounded
-percentile error — a standard streaming-stats trick.
+WHEN A WINDOW IS WRITTEN (watermark + allowed lateness)
+------------------------------------------------------
+Event times come from the SDK, and events reach Kafka a few seconds late
+(the SDK batches every 2 s). A window [t, t+60s) is written once the wall
+clock passes t + 60 s + `metrics_allowed_lateness_s` (default 10 s), so
+normal stragglers still land in it.
 
-DURABILITY TRADEOFF
--------------------
-Window state lives only in process memory. A crash mid-window loses the
-partial aggregates for that window. This is acceptable: the raw events
-are durable in Kafka and ClickHouse, so an analyst can always re-derive
-aggregates by query. We never commit Kafka offsets for events whose
-window hasn't closed and been written, so on restart we re-process and
-re-aggregate.
+An event that arrives after its window was written isn't dropped and
+doesn't overwrite anything: it opens a small "late" window for the same
+minute that is written on the next loop. So a minute can have more than
+one row in llm_metrics_1m. Every reader aggregates rows: counts and cost
+are summed, and percentiles merge the stored t-digest centroids:
+
+    quantileTDigestWeightedArray(0.99)(latency_means, latency_weights)
+
+The previous version wrote a second row for the same minute in that case,
+which the Overview page then averaged as if it were another minute. It
+also showed "avg of per-minute p99s", which is not a p99 at all.
+
+OFFSETS (at-least-once)
+-----------------------
+Kafka offsets are committed only up to the oldest event still sitting in
+an open window, so a crash or restart re-reads exactly the events whose
+windows weren't written yet. (Previously offsets were committed on every
+poll, so a crash silently lost up to 70 s of metrics.) The cost of
+at-least-once: an event re-read after a crash whose own window had
+already been written gets counted twice; that only affects a few late
+events around the crash.
+
+Redis: `metrics:{tenant}:{project}:{model}` holds the latest complete
+window (late corrections don't overwrite it), and every written window is
+published on `live:{tenant}` for the dashboard's live chart, which adds
+late corrections to the minute they belong to.
 """
 from __future__ import annotations
 
@@ -28,208 +46,195 @@ import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-
-import random
+from typing import Any
 
 from clickhouse import ClickHouseWriter
 from config import settings
 from kafka_client import make_consumer
 from pricing import calculate_cost
 from redis_client import get_redis
+from tdigest import TDigest
 
 logger = logging.getLogger(__name__)
 
 GROUP_ID = "metrics-aggregator"
 
+WindowKey = tuple[str, str, str, int]   # tenant, project, model, window start (epoch s)
+
 
 @dataclass
-class WindowState:
+class Window:
+    late: bool = False
     request_count: int = 0
     error_count: int = 0
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cost_usd: float = 0.0
-    latencies: list = field(default_factory=list)
+    digest: TDigest = field(default_factory=TDigest)
+    # Lowest Kafka offset per partition among this window's events: the
+    # committed offset can't move past it until the window is written.
+    first_offsets: dict[Any, int] = field(default_factory=dict)
 
 
-def _window_start(timestamp_ms: int, window_s: int) -> datetime:
-    bucket_s = (timestamp_ms // 1000) // window_s * window_s
-    return datetime.fromtimestamp(bucket_s, tz=timezone.utc)
+class MetricsAggregator:
+    """Pure windowing logic (no I/O), so it can be unit-tested."""
+
+    def __init__(self, window_s: int, lateness_s: float) -> None:
+        self.window_s = window_s
+        self.lateness_s = lateness_s
+        self.windows: dict[WindowKey, Window] = {}
+        self.consumed: dict[Any, int] = {}   # partition -> next offset to read
+
+    def deadline(self, window_start: int) -> float:
+        return window_start + self.window_s + self.lateness_s
+
+    def add(self, tp: Any, offset: int, event: Any, now: float | None = None) -> None:
+        self.consumed[tp] = offset + 1
+        if not isinstance(event, dict):
+            return  # undecodable message (see kafka_client._safe_json)
+        tenant, project, model = event.get("tenant_id"), event.get("project_id"), event.get("model")
+        if not (tenant and project and model):
+            return
+        now = time.time() if now is None else now
+        try:
+            ts_s = int(event.get("timestamp_ms") or now * 1000) // 1000
+        except (TypeError, ValueError):
+            ts_s = int(now)
+        start = ts_s - ts_s % self.window_s
+        key = (str(tenant), str(project), str(model), start)
+
+        w = self.windows.get(key)
+        if w is None:
+            # Its regular window was already written (or would have been).
+            w = self.windows[key] = Window(late=now >= self.deadline(start))
+        w.first_offsets.setdefault(tp, offset)
+
+        w.request_count += 1
+        if event.get("status") in ("error", "timeout"):
+            w.error_count += 1
+        try:
+            pt = int(event.get("prompt_tokens") or 0)
+            ct = int(event.get("completion_tokens") or 0)
+        except (TypeError, ValueError):
+            pt = ct = 0
+        w.prompt_tokens += pt
+        w.completion_tokens += ct
+        w.cost_usd += calculate_cost(str(model), pt, ct)
+        try:
+            w.digest.add(float(event.get("latency_ms")))
+        except (TypeError, ValueError):
+            pass
+
+    def pop_due(self, now: float | None = None, *, force: bool = False) -> list[tuple[WindowKey, Window]]:
+        """Remove and return windows that are ready to write."""
+        now = time.time() if now is None else now
+        due = [k for k, w in self.windows.items()
+               if force or w.late or now >= self.deadline(k[3])]
+        return [(k, self.windows.pop(k)) for k in sorted(due, key=lambda k: k[3])]
+
+    def commit_positions(self) -> dict[Any, int]:
+        """Offsets that are safe to commit: everything before them has been
+        written (or skipped as malformed)."""
+        positions = dict(self.consumed)
+        for w in self.windows.values():
+            for tp, off in w.first_offsets.items():
+                if off < positions.get(tp, off + 1):
+                    positions[tp] = off
+        return positions
 
 
-def _key(tenant: str, project: str, model: str, window: datetime) -> tuple:
-    return (tenant, project, model, window)
+def window_row(key: WindowKey, w: Window) -> dict:
+    tenant, project, model, start = key
+    centroids = w.digest.centroids()
+    return {
+        "tenant_id":         tenant,
+        "project_id":        project,
+        "model":             model,
+        "window_start":      datetime.fromtimestamp(start, tz=timezone.utc),
+        "request_count":     w.request_count,
+        "error_count":       w.error_count,
+        "prompt_tokens":     w.prompt_tokens,
+        "completion_tokens": w.completion_tokens,
+        "cost_usd":          float(w.cost_usd),
+        "p50_latency_ms":    w.digest.quantile(0.50),
+        "p95_latency_ms":    w.digest.quantile(0.95),
+        "p99_latency_ms":    w.digest.quantile(0.99),
+        "latency_means":     [float(m) for m, _ in centroids],
+        "latency_weights":   [int(round(c)) for _, c in centroids],
+    }
+
+
+async def write_windows(windows: list[tuple[WindowKey, Window]], writer: Any, redis: Any) -> None:
+    if not windows:
+        return
+    rows = [window_row(k, w) for k, w in windows]
+    await writer.write_metrics(rows)   # raises on failure: nothing is committed
+
+    pipe = redis.pipeline()
+    for (key, w), row in zip(windows, rows):
+        tenant, project, model, _ = key
+        summary = {
+            "window_start":      row["window_start"].isoformat(),
+            "request_count":     row["request_count"],
+            "error_count":       row["error_count"],
+            "prompt_tokens":     row["prompt_tokens"],
+            "completion_tokens": row["completion_tokens"],
+            "cost_usd":          round(row["cost_usd"], 6),
+            "p50_latency_ms":    row["p50_latency_ms"],
+            "p95_latency_ms":    row["p95_latency_ms"],
+            "p99_latency_ms":    row["p99_latency_ms"],
+        }
+        if not w.late:
+            pipe.set(f"metrics:{tenant}:{project}:{model}", json.dumps(summary).encode(),
+                     ex=settings.metrics_redis_ttl_s)
+        # Fire-and-forget to dashboard WebSocket clients; late corrections
+        # are added to the same minute by the live chart.
+        pipe.publish(f"live:{tenant}", json.dumps({
+            "project_id":     project,
+            "model":          model,
+            "window_start":   summary["window_start"],
+            "request_count":  row["request_count"],
+            "p99_latency_ms": row["p99_latency_ms"],
+            "late":           w.late,
+        }).encode())
+    await pipe.execute()
+
+
+async def step(agg: MetricsAggregator, consumer: Any, writer: Any, redis: Any,
+               committed: dict[Any, int], *, now: float | None = None, force: bool = False) -> None:
+    """Write due windows, then commit whatever offsets became safe."""
+    await write_windows(agg.pop_due(now, force=force), writer, redis)
+    positions = agg.commit_positions()
+    changed = {tp: off for tp, off in positions.items() if committed.get(tp) != off}
+    if changed:
+        await consumer.commit(changed)
+        committed.update(changed)
 
 
 async def run_metrics_aggregator(stop: asyncio.Event) -> None:
     consumer = make_consumer(GROUP_ID)
     await consumer.start()
     writer = ClickHouseWriter()
+    await writer.ensure_metrics_schema()
     redis = get_redis()
-
-    # window-key → WindowState
-    windows: dict[tuple, WindowState] = {}
-    # (tenant, project, model) → most recent processed bucket-start (datetime)
-    last_seen_bucket: dict[tuple, datetime] = {}
-
-    logger.info("metrics-aggregator: started")
-
+    agg = MetricsAggregator(settings.metrics_window_s, settings.metrics_allowed_lateness_s)
+    committed: dict[Any, int] = {}
+    logger.info("metrics-aggregator: started (window %ss, lateness %ss)",
+                settings.metrics_window_s, settings.metrics_allowed_lateness_s)
     try:
         while not stop.is_set():
             try:
-                # Poll briefly so we can check `stop` and flush expired windows
                 batches = await asyncio.wait_for(consumer.getmany(timeout_ms=1_000), timeout=2.0)
             except asyncio.TimeoutError:
                 batches = {}
-
             for tp, msgs in batches.items():
                 for msg in msgs:
-                    _accumulate(windows, last_seen_bucket, msg.value)
+                    agg.add(tp, msg.offset, msg.value)
+            await step(agg, consumer, writer, redis, committed)
 
-            # Flush windows whose end time has passed
-            await _flush_expired(windows, writer, redis, force=False)
-
-            # Commit progress; we tolerate at-least-once for telemetry data
-            if batches:
-                await consumer.commit()
-
-        # Drain on shutdown — flush every open window even if not yet closed
-        logger.info("metrics-aggregator: draining %d open windows", len(windows))
-        await _flush_expired(windows, writer, redis, force=True)
-        await consumer.commit()
-
+        logger.info("metrics-aggregator: draining %d open windows", len(agg.windows))
+        await step(agg, consumer, writer, redis, committed, force=True)
     finally:
         await consumer.stop()
         writer.close()
         logger.info("metrics-aggregator: stopped")
-
-
-def _accumulate(
-    windows: dict[tuple, WindowState],
-    last_seen: dict[tuple, datetime],
-    event: dict,
-) -> None:
-    tenant = event.get("tenant_id")
-    project = event.get("project_id")
-    model = event.get("model")
-    if not (tenant and project and model):
-        return  # malformed, skip
-
-    ts_ms = event.get("timestamp_ms") or int(time.time() * 1000)
-    bucket = _window_start(ts_ms, settings.metrics_window_s)
-    key = _key(tenant, project, model, bucket)
-
-    state = windows.get(key)
-    if state is None:
-        state = WindowState()
-        windows[key] = state
-
-    state.request_count += 1
-    if event.get("status") in ("error", "timeout"):
-        state.error_count += 1
-
-    pt = int(event.get("prompt_tokens") or 0)
-    ct = int(event.get("completion_tokens") or 0)
-    state.prompt_tokens += pt
-    state.completion_tokens += ct
-    state.cost_usd += calculate_cost(model, pt, ct)
-
-    latency = event.get("latency_ms")
-    if latency is not None:
-        try:
-            state.latencies.append(float(latency))
-        except Exception:
-            pass
-
-    last_seen[(tenant, project, model)] = bucket
-
-
-async def _flush_expired(
-    windows: dict[tuple, WindowState],
-    writer: ClickHouseWriter,
-    redis,
-    *,
-    force: bool,
-) -> None:
-    """A window is flushed once wall-clock time has moved past its end."""
-    now = datetime.now(tz=timezone.utc).timestamp()
-    window_s = settings.metrics_window_s
-
-    to_flush: list[tuple] = []
-    for key, _state in windows.items():
-        _, _, _, bucket = key
-        if force or now >= bucket.timestamp() + window_s:
-            to_flush.append(key)
-
-    if not to_flush:
-        return
-
-    rows = []
-    pipe = redis.pipeline()
-    for key in to_flush:
-        tenant, project, model, bucket = key
-        s = windows.pop(key)
-        p50 = _percentile(s.latencies, 0.50)
-        p95 = _percentile(s.latencies, 0.95)
-        p99 = _percentile(s.latencies, 0.99)
-
-        row = {
-            "tenant_id":         tenant,
-            "project_id":        project,
-            "model":             model,
-            "window_start":      bucket,
-            "request_count":     s.request_count,
-            "error_count":       s.error_count,
-            "prompt_tokens":     s.prompt_tokens,
-            "completion_tokens": s.completion_tokens,
-            "cost_usd":          float(s.cost_usd),
-            "p50_latency_ms":    p50,
-            "p95_latency_ms":    p95,
-            "p99_latency_ms":    p99,
-        }
-        rows.append(row)
-
-        live = {
-            "window_start":      bucket.isoformat(),
-            "request_count":     s.request_count,
-            "error_count":       s.error_count,
-            "prompt_tokens":     s.prompt_tokens,
-            "completion_tokens": s.completion_tokens,
-            "cost_usd":          round(float(s.cost_usd), 6),
-            "p50_latency_ms":    p50,
-            "p95_latency_ms":    p95,
-            "p99_latency_ms":    p99,
-        }
-        pipe.set(
-            f"metrics:{tenant}:{project}:{model}",
-            json.dumps(live).encode(),
-            ex=settings.metrics_redis_ttl_s,
-        )
-
-        # Phase 4: stream the freshly closed window to any dashboard WS clients
-        # subscribed to live:{tenant_id}. This is fire-and-forget; if no one is
-        # listening Redis simply drops the message.
-        live_event = {
-            "project_id":     project,
-            "model":          model,
-            "window_start":   bucket.isoformat(),
-            "request_count":  s.request_count,
-            "p99_latency_ms": p99,
-        }
-        pipe.publish(f"live:{tenant}", json.dumps(live_event).encode())
-
-    await writer.write_metrics(rows)
-    await pipe.execute()
-
-
-def _percentile(digest: list, q: float) -> float:
-    try:
-        if not digest:
-            return 0.0
-        sample = digest if len(digest) <= 1000 else random.sample(digest, 1000)
-        sorted_sample = sorted(sample)
-        idx = int(q * len(sorted_sample))
-        return float(sorted_sample[min(idx, len(sorted_sample) - 1)])
-    except Exception:
-        return 0.0
-

@@ -17,6 +17,18 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 
+def _safe_json(raw: bytes):
+    """Decode a message, or return None if it isn't valid JSON. Raising here
+    would make getmany() fail on the same message forever, taking down every
+    consumer in this process. The raw-events consumer dead-letters such
+    messages; here they're just skipped."""
+    try:
+        return json.loads(raw.decode())
+    except (UnicodeDecodeError, ValueError, AttributeError):
+        logger.warning("skipping a message that isn't valid JSON (%d bytes)", len(raw or b""))
+        return None
+
+
 def make_consumer(group_id: str, topic: str | None = None) -> AIOKafkaConsumer:
     return AIOKafkaConsumer(
         topic or settings.kafka_topic,
@@ -24,7 +36,7 @@ def make_consumer(group_id: str, topic: str | None = None) -> AIOKafkaConsumer:
         group_id=group_id,
         auto_offset_reset="latest",          # only process events going forward
         enable_auto_commit=False,            # commit explicitly after side-effects
-        value_deserializer=lambda b: json.loads(b.decode()),
+        value_deserializer=_safe_json,
         # Pull large batches to keep throughput up — each consumer is a single
         # asyncio task and is easily the bottleneck if Kafka is fast.
         max_poll_records=500,

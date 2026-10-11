@@ -132,16 +132,21 @@ class CostSpikeDetector:
 
     async def process(self, event: dict) -> dict | None:
         """Account one event; publish and return the anomaly if it fires."""
+        if not isinstance(event, dict):
+            return None  # undecodable message
         tenant = event.get("tenant_id")
         project = event.get("project_id")
         if not (tenant and project):
             return None
 
-        cost = self._cost_fn(
-            event.get("model") or "unknown",
-            int(event.get("prompt_tokens") or 0),
-            int(event.get("completion_tokens") or 0),
-        )
+        try:
+            cost = self._cost_fn(
+                event.get("model") or "unknown",
+                int(event.get("prompt_tokens") or 0),
+                int(event.get("completion_tokens") or 0),
+            )
+        except (TypeError, ValueError):
+            return None  # malformed token counts
         if cost <= 0:
             return None
 

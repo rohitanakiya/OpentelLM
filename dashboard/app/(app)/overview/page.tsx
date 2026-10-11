@@ -10,7 +10,7 @@ import { fmtCost, fmtMs, fmtPct, fmtTokens } from "@/lib/format";
 type Stats = {
   requests_today: number;
   cost_today: number;
-  avg_p99_latency: number;
+  p99_latency: number;
   error_rate: number;
 };
 
@@ -48,7 +48,7 @@ export default function OverviewPage() {
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           <StatCard label="Requests today" value={fmtTokens(stats.requests_today)} />
           <StatCard label="Cost today"     value={fmtCost(stats.cost_today)} />
-          <StatCard label="Avg p99 latency" value={fmtMs(stats.avg_p99_latency)} />
+          <StatCard label="p99 latency" value={fmtMs(stats.p99_latency)} />
           <StatCard
             label="Error rate"
             value={fmtPct(stats.error_rate)}

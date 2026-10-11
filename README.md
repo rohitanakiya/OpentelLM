@@ -234,9 +234,25 @@ The non-obvious calls. Every one of these is an interview talking point.
   The statistics are ~100 lines of pure Python, checked against scipy in
   the tests, rather than a ~100 MB scipy dependency.
 
-- **T-Digest for percentiles, not a sorted list.** Storing every latency
-  value in memory grows unbounded with traffic. T-Digest is O(1) memory
-  per (tenant, project, model, window) with bounded percentile error.
+- **T-Digest for percentiles, and digests (not percentiles) in storage.**
+  Keeping every latency grows memory with traffic; a t-digest
+  (`stream-processor/tdigest.py`, ~100 lines, no dependencies) keeps ~60
+  centroids per window whatever the traffic, and is most accurate at the
+  tails. Measured: estimates within 0.2% in rank of the exact value, exact
+  for windows under ~50 calls. Percentiles can't be averaged: on 30
+  minutes of test traffic with one slow minute, the true p99 was 1,902 ms;
+  "average of per-minute p99s" said 1,682 ms and "max of per-minute p99s"
+  said 4,078 ms. So each minute row stores its centroids, and ClickHouse
+  merges them over any range with
+  `quantileTDigestWeightedArray(0.99)(latency_means, latency_weights)`
+  (1,926 ms in that test).
+
+- **Watermark + allowed lateness, at-least-once offsets.** A minute is
+  written 10 s after it ends, so SDK batching delays still count in the
+  right minute; anything later becomes an extra row for that minute, so
+  every reader sums and merges rather than trusting one row per minute.
+  Kafka offsets are committed only up to the oldest event in a minute not
+  yet written, so a crash replays exactly the unwritten events.
 
 - **Cursor pagination, not offset.** Tuple compare on `(timestamp, trace_id)`
   is O(1) at any depth. Offset pagination skews under concurrent inserts

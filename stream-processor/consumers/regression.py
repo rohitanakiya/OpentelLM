@@ -198,6 +198,8 @@ class RegressionDetector:
 
     async def process(self, event: dict) -> list[dict]:
         """Record one event; return (and publish) any regressions it reveals."""
+        if not isinstance(event, dict):
+            return []  # undecodable message
         tenant = event.get("tenant_id")
         project = event.get("project_id")
         version = event.get("deployment_version") or event.get("prompt_version")

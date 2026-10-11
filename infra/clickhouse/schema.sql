@@ -45,7 +45,13 @@ CREATE TABLE IF NOT EXISTS opentelm.llm_metrics_1m (
     cost_usd          Float32,
     p50_latency_ms    Float32,
     p95_latency_ms    Float32,
-    p99_latency_ms    Float32
+    p99_latency_ms    Float32,
+    -- t-digest centroids of this row's latencies (means + weights). Percentiles
+    -- can't be added up, but digests can: merge any set of rows with
+    --   quantileTDigestWeightedArray(0.99)(latency_means, latency_weights)
+    -- A minute can have more than one row (late events), so always aggregate.
+    latency_means     Array(Float32),
+    latency_weights   Array(UInt32)
 ) ENGINE = MergeTree()
 PARTITION BY toYYYYMM(window_start)
 ORDER BY (tenant_id, project_id, model, window_start);

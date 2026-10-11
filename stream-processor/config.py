@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     # Tumbling window length for the metrics aggregator
     metrics_window_s: int = 60
     metrics_redis_ttl_s: int = 90
+    # A window is written this many seconds after it ends, so events that
+    # reach Kafka a little late (SDK batching) still count in it.
+    metrics_allowed_lateness_s: float = 10.0
 
     # Cost-spike anomaly (see consumers/anomaly.py for the full rule):
     # fire when this hour's spend > multiplier x the average spend of the

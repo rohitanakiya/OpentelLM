@@ -32,7 +32,13 @@ class ClickHouseWriter:
             host=settings.clickhouse_host,
             port=settings.clickhouse_port,
             database=settings.clickhouse_db,
+            user=settings.clickhouse_user,
+            password=settings.clickhouse_password,
+            secure=settings.clickhouse_secure,
         )
+
+    def close(self) -> None:
+        self._client.disconnect()
 
     def write_batch(self, rows: list[dict]) -> None:
         if not rows:
@@ -45,12 +51,12 @@ class ClickHouseWriter:
                 "tenant_id":          r["tenant_id"],
                 "project_id":         r["project_id"],
                 "trace_id":           r["trace_id"],
-                "span_id":            r.get("span_id", ""),
+                "span_id":            r.get("span_id") or "",
                 "model":              r["model"],
                 "provider":           r["provider"],
-                "prompt_tokens":      r["prompt_tokens"],
-                "completion_tokens":  r["completion_tokens"],
-                "total_tokens":       r["prompt_tokens"] + r["completion_tokens"],
+                "prompt_tokens":      int(r["prompt_tokens"]),
+                "completion_tokens":  int(r["completion_tokens"]),
+                "total_tokens":       int(r["prompt_tokens"]) + int(r["completion_tokens"]),
                 "latency_ms":         r["latency_ms"],
                 "cost_usd":           r["cost_usd"],
                 "status":             r["status"],
@@ -60,7 +66,7 @@ class ClickHouseWriter:
                 "response_hash":      r["response_hash"],
                 "sdk_version":        r.get("sdk_version", "unknown"),
                 "deployment_version": r.get("deployment_version"),
-                "tags":               r.get("tags", {}),
+                "tags":               {str(k): str(v) for k, v in (r.get("tags") or {}).items()},
                 "timestamp":          ts,
             })
         self._client.execute(_INSERT_SQL, data)

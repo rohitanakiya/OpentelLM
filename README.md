@@ -83,15 +83,29 @@ opentelm.init({ apiKey: process.env.OPENTELM_API_KEY! });
 
 ## Local development
 
-Five commands from a fresh clone:
+Runs entirely on your machine with Docker, for free: no cloud account, and
+no OpenAI or Anthropic calls are needed to try it.
 
 ```bash
-git clone https://github.com/yourorg/opentelm && cd opentelm
-cp .env.example .env                 # edit JWT_SECRET_KEY and COOKIE_SECRET
-docker compose up -d --build         # Postgres + Redis + Kafka + ClickHouse + 5 services
-python infra/postgres/seed_dev.py    # creates a tenant + project + API key
-open http://localhost:3000           # log in as dev@example.com / devpassword
+git clone https://github.com/rohitanakiya/OpentelLM && cd OpentelLM
+bash scripts/dev-up.sh       # creates .env with random secrets, builds and starts everything
+bash scripts/smoke-test.sh   # sends 200 fake LLM calls and checks every stage (~2 min)
 ```
+
+Then open http://localhost:3000 and log in with the account the smoke test
+prints (the dashboard has no sign-up page yet; create other accounts with
+`POST /auth/register` at http://localhost:8001/docs). Create an API key under
+Settings and point an SDK at `http://localhost:8000`. `docker compose down` stops everything
+(`down -v` also deletes the data).
+
+Only ports 3000, 8000 and 8001 are opened on your machine. Postgres, Redis,
+Kafka and ClickHouse stay inside Docker, so they never clash with a database
+you already have installed (uncomment their `ports:` in docker-compose.yml if
+you need to reach them).
+
+The services refuse to start without real secrets: `JWT_SECRET_KEY` (32+
+characters) and `API_KEY_PEPPER` (16+). `dev-up.sh` generates them; the old
+placeholder values from `.env.example` are rejected.
 
 Run the test suite:
 
@@ -149,7 +163,6 @@ Push to `main`. The `deploy.yml` workflow:
 | `GCP_WORKLOAD_IDENTITY_PROVIDER`  | `terraform output workload_identity_provider` |
 | `GCP_SERVICE_ACCOUNT`             | `terraform output deployer_service_account` |
 | `JWT_SECRET_KEY`                  | `openssl rand -hex 32` |
-| `COOKIE_SECRET`                   | `openssl rand -hex 16` |
 | `API_KEY_PEPPER`                  | `openssl rand -hex 16` |
 | `CLICKHOUSE_URL`                  | ClickHouse Cloud console |
 | `CLICKHOUSE_PASSWORD`             | ClickHouse Cloud console |
@@ -261,7 +274,7 @@ What's planned next, ordered by what users will feel first:
   the current shape; production needs Alembic or sqitch.
 - **SAML / OIDC SSO** for enterprise tenants.
 
-If one of these matters to you, [open an issue](https://github.com/yourorg/opentelm/issues/new/choose)
+If one of these matters to you, [open an issue](https://github.com/rohitanakiya/OpentelLM/issues/new/choose)
 or send a PR — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License

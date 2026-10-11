@@ -6,10 +6,9 @@ aren't obvious from reading the code.
 ## Run the platform locally
 
 ```bash
-git clone https://github.com/yourorg/opentelm && cd opentelm
-cp .env.example .env                  # set JWT_SECRET_KEY + COOKIE_SECRET
-docker compose up -d --build
-python infra/postgres/seed_dev.py     # creates a tenant + project + write key
+git clone https://github.com/rohitanakiya/OpentelLM && cd OpentelLM
+bash scripts/dev-up.sh                # .env with random secrets, then docker compose up
+bash scripts/smoke-test.sh            # end-to-end check with fake events (free)
 open http://localhost:3000
 ```
 

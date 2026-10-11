@@ -35,6 +35,9 @@ GROUP_ID        = os.environ.get("ANOMALY_CONSUMER_GROUP", "anomaly-persister")
 CLICKHOUSE_HOST = os.environ.get("CLICKHOUSE_HOST", "localhost")
 CLICKHOUSE_PORT = int(os.environ.get("CLICKHOUSE_PORT", "9000"))
 CLICKHOUSE_DB   = os.environ.get("CLICKHOUSE_DB", "opentelm")
+CLICKHOUSE_USER = os.environ.get("CLICKHOUSE_USER", "default")
+CLICKHOUSE_PASSWORD = os.environ.get("CLICKHOUSE_PASSWORD", "")
+CLICKHOUSE_SECURE = os.environ.get("CLICKHOUSE_SECURE", "").lower() in ("1", "true", "yes")
 REDIS_URL       = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 ALERT_LIST_CAP  = 100
 
@@ -82,7 +85,8 @@ async def run() -> None:
     )
     await consumer.start()
 
-    ch = Client(host=CLICKHOUSE_HOST, port=CLICKHOUSE_PORT, database=CLICKHOUSE_DB)
+    ch = Client(host=CLICKHOUSE_HOST, port=CLICKHOUSE_PORT, database=CLICKHOUSE_DB,
+                user=CLICKHOUSE_USER, password=CLICKHOUSE_PASSWORD, secure=CLICKHOUSE_SECURE)
     redis = aioredis.from_url(REDIS_URL, decode_responses=False)
 
     logger.info("anomaly-consumer: started")

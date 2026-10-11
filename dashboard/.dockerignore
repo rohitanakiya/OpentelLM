@@ -1,0 +1,8 @@
+# Keep host build output and Windows/macOS node_modules out of the image;
+# the Dockerfile installs Linux dependencies itself with npm ci.
+node_modules
+.next
+.env
+.env.*
+npm-debug.log*
+*.tsbuildinfo

@@ -2,13 +2,13 @@
 # Final image runs:
 #   1. next start (the App Router server) on :3000
 #   2. ws-server.mjs on :3001 (standalone WebSocket server)
-# Both processes are launched by `npm start` via concurrently.
+# Both processes are started by the CMD at the bottom.
 
 FROM node:20-alpine AS deps
 WORKDIR /app
-COPY package.json package-lock.json* ./
-# package-lock.json may not exist for first-time builds — make it optional
-RUN npm install --no-audit --no-fund
+COPY package.json package-lock.json ./
+# npm ci installs exactly what package-lock.json pins (reproducible builds)
+RUN npm ci --no-audit --no-fund
 
 FROM node:20-alpine AS builder
 WORKDIR /app

@@ -9,6 +9,9 @@ class Settings(BaseSettings):
     clickhouse_host: str = "localhost"
     clickhouse_port: int = 9000
     clickhouse_db: str = "opentelm"
+    clickhouse_user: str = "default"
+    clickhouse_password: str = ""
+    clickhouse_secure: bool = False   # TLS; required by ClickHouse Cloud (port 9440)
 
     redis_url: str = "redis://localhost:6379/0"
 

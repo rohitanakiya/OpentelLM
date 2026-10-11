@@ -14,19 +14,24 @@ type Row = {
   error_rate: number;
 };
 
+// Computed from raw events, not the per-minute rollup. The rollup only keeps
+// per-minute percentiles, and percentiles can't be combined: the old
+// "avg of minute p50s" and "max of minute p99s" were biased (one slow minute
+// with 2 calls set the p99 for the whole week). A scan of llm_events for one
+// tenant and date range is cheap, because the table is ordered by
+// (tenant_id, project_id, timestamp).
 const QUERY = `
   SELECT
     model,
-    sum(request_count)                                       AS request_count,
-    sum(cost_usd)                                            AS cost_usd,
-    avg(p50_latency_ms)                                      AS avg_latency_ms,
-    max(p99_latency_ms)                                      AS p99_latency_ms,
-    if(sum(request_count) > 0,
-       sum(error_count) / sum(request_count), 0)             AS error_rate
-  FROM opentelm.llm_metrics_1m
+    count()                                   AS request_count,
+    sum(cost_usd)                             AS cost_usd,
+    avg(latency_ms)                           AS avg_latency_ms,
+    quantileTDigest(0.99)(latency_ms)         AS p99_latency_ms,
+    countIf(status != 'success') / count()    AS error_rate
+  FROM opentelm.llm_events
   WHERE tenant_id = {tenant:String}
-    AND window_start >= parseDateTime64BestEffort({fromIso:String})
-    AND window_start <  parseDateTime64BestEffort({toIso:String})
+    AND timestamp >= parseDateTime64BestEffort({fromIso:String}, 3, 'UTC')
+    AND timestamp <  parseDateTime64BestEffort({toIso:String}, 3, 'UTC')
   GROUP BY model
   ORDER BY request_count DESC
 `;

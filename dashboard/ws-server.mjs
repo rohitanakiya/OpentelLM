@@ -20,13 +20,20 @@ import { jwtVerify } from "jose";
 import Redis from "ioredis";
 
 const PORT = Number(process.env.WS_PORT ?? 3001);
-const JWT_SECRET     = process.env.JWT_SECRET_KEY ?? "change-me-in-production-must-be-at-least-32-chars";
+const JWT_SECRET     = process.env.JWT_SECRET_KEY ?? "";
 const JWT_ALGORITHM  = process.env.JWT_ALGORITHM ?? "HS256";
 const REDIS_URL      = process.env.REDIS_URL ?? "redis://localhost:6379";
 const ACCESS_COOKIE  = "otlm_access";
 const PING_INTERVAL  = 30_000;
 const PONG_TIMEOUT   = 5_000;
 
+// Same rules as jwtSecret() in lib/env.ts: refuse to start without a real
+// secret (the old fallback was public, so anyone could forge a session).
+if (JWT_SECRET.length < 32 || /change-me|change_me|replace_me|replace-me/i.test(JWT_SECRET)) {
+  console.error("ws-server: JWT_SECRET_KEY is missing, shorter than 32 chars, or a placeholder. " +
+                "Run `bash scripts/dev-up.sh` to create .env with random secrets.");
+  process.exit(1);
+}
 const _secret = new TextEncoder().encode(JWT_SECRET);
 
 function parseCookies(header) {

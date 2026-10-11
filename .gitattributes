@@ -1,0 +1,4 @@
+# Shell scripts must keep LF line endings or bash fails on Windows
+# checkouts with "$'\r': command not found".
+*.sh text eol=lf
+.githooks/* text eol=lf

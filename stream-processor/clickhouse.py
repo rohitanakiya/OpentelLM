@@ -41,6 +41,9 @@ class ClickHouseWriter:
             host=settings.clickhouse_host,
             port=settings.clickhouse_port,
             database=settings.clickhouse_db,
+            user=settings.clickhouse_user,
+            password=settings.clickhouse_password,
+            secure=settings.clickhouse_secure,
         )
         self._loop = asyncio.get_event_loop()
 

@@ -24,7 +24,12 @@ DSN = os.environ.get(
     "POSTGRES_DSN",
     "postgresql://opentelm:opentelm@localhost:5432/opentelm",
 )
-PEPPER = os.environ.get("API_KEY_PEPPER", "opentelm-key-secret").encode()
+# Must be the same API_KEY_PEPPER that auth-service and ingest-api use (it is
+# in your .env), or ingest-api won't recognise the key this script prints.
+_pepper = os.environ.get("API_KEY_PEPPER", "")
+if not _pepper:
+    raise SystemExit("Set API_KEY_PEPPER to the value in your .env first.")
+PEPPER = _pepper.encode()
 
 
 def make_key() -> tuple[str, str, str]:

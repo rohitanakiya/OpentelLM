@@ -21,7 +21,7 @@ export async function POST() {
   const data: { access_token: string; expires_in: number } = await upstream.json();
   const res = NextResponse.json({ ok: true });
   res.cookies.set(ACCESS_COOKIE, data.access_token, {
-    httpOnly: true, sameSite: "strict", secure: env.IS_PRODUCTION,
+    httpOnly: true, sameSite: "strict", secure: env.COOKIE_SECURE,
     path: "/", maxAge: data.expires_in,
   });
   return res;

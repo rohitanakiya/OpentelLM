@@ -7,7 +7,7 @@
 import { jwtVerify } from "jose";
 import { cookies } from "next/headers";
 import { NextResponse, type NextRequest } from "next/server";
-import { env } from "./env";
+import { env, jwtSecret } from "./env";
 
 export const ACCESS_COOKIE  = "otlm_access";
 export const REFRESH_COOKIE = "otlm_refresh";
@@ -22,12 +22,11 @@ export type AccessClaims = {
   exp: number;
 };
 
-const _secret = new TextEncoder().encode(env.JWT_SECRET_KEY);
-
 /** Verify an access JWT signature + expiry. Returns null on failure. */
 export async function verifyAccess(token: string): Promise<AccessClaims | null> {
+  const secret = jwtSecret(); // throws on a missing/weak secret: a config error, not a bad token
   try {
-    const { payload } = await jwtVerify(token, _secret, {
+    const { payload } = await jwtVerify(token, secret, {
       algorithms: [env.JWT_ALGORITHM],
     });
     if (payload.type !== "access") return null;
@@ -56,7 +55,7 @@ export async function getCurrentTenantFromRequest(
 const COOKIE_BASE = {
   httpOnly: true,
   sameSite: "strict" as const,
-  secure: env.IS_PRODUCTION,
+  secure: env.COOKIE_SECURE,
   path: "/",
 };
 

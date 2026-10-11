@@ -17,7 +17,6 @@ import {
   ACCESS_COOKIE,
   REFRESH_COOKIE,
   clearAuthCookies,
-  setAuthCookies,
   verifyAccess,
 } from "@/lib/auth";
 import { env } from "@/lib/env";
@@ -52,6 +51,31 @@ async function tryRefresh(refreshToken: string): Promise<{
   }
 }
 
+/**
+ * Let the request through with a fresh access token.
+ *
+ * Setting the cookie on the RESPONSE only helps the browser's next request.
+ * Route handlers and server components read cookies from the REQUEST, so we
+ * also rewrite the Cookie header the rest of this request sees. Without
+ * that, the request that triggered the refresh still failed with 401 (about
+ * once every 15 minutes, whenever the access token expired).
+ */
+function continueWithAccessToken(req: NextRequest, token: string, maxAgeS: number): NextResponse {
+  const cookies = req.cookies.getAll().filter((c) => c.name !== ACCESS_COOKIE);
+  cookies.push({ name: ACCESS_COOKIE, value: token });
+  const headers = new Headers(req.headers);
+  headers.set("cookie", cookies.map((c) => `${c.name}=${encodeURIComponent(c.value)}`).join("; "));
+  const res = NextResponse.next({ request: { headers } });
+  res.cookies.set(ACCESS_COOKIE, token, {
+    httpOnly: true,
+    sameSite: "strict",
+    secure: env.COOKIE_SECURE,
+    path: "/",
+    maxAge: maxAgeS,
+  });
+  return res;
+}
+
 export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
@@ -64,37 +88,11 @@ export async function middleware(req: NextRequest) {
 
   let claims = access ? await verifyAccess(access) : null;
 
-  // Token absent or invalid — try to silently refresh
-  if (!claims && refresh) {
+  // Token absent / invalid, or valid but expiring within 60s: silently refresh.
+  const expiringSoon = claims !== null && claims.exp - Math.floor(Date.now() / 1000) < 60;
+  if ((!claims || expiringSoon) && refresh) {
     const refreshed = await tryRefresh(refresh);
-    if (refreshed) {
-      const res = NextResponse.next();
-      // We don't have the refresh token's expiry exposed; reuse existing cookie.
-      res.cookies.set(ACCESS_COOKIE, refreshed.access_token, {
-        httpOnly: true,
-        sameSite: "strict",
-        secure: env.IS_PRODUCTION,
-        path: "/",
-        maxAge: refreshed.expires_in,
-      });
-      return res;
-    }
-  }
-
-  // Proactive refresh: token still valid but expiring within 60s
-  if (claims && claims.exp - Math.floor(Date.now() / 1000) < 60 && refresh) {
-    const refreshed = await tryRefresh(refresh);
-    if (refreshed) {
-      const res = NextResponse.next();
-      res.cookies.set(ACCESS_COOKIE, refreshed.access_token, {
-        httpOnly: true,
-        sameSite: "strict",
-        secure: env.IS_PRODUCTION,
-        path: "/",
-        maxAge: refreshed.expires_in,
-      });
-      return res;
-    }
+    if (refreshed) return continueWithAccessToken(req, refreshed.access_token, refreshed.expires_in);
   }
 
   if (claims) return NextResponse.next();
